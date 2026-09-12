@@ -1,0 +1,311 @@
+#   自用 fork 构建工作流：基于上游 build-app.yml 精简。
+#   与上游的差异：
+#   - 不限定仓库与分支，任意分支均可手动触发；
+#   - 去掉 SignPath 代码签名（产物未签名）与 Sentry 上传/部署登记；
+#   - 去掉 CNB、MirrorChyan 与 sync-cnb 分发渠道；
+#   - 构建时给版本号追加 +fork.YYYYMMDD 后缀，与上游发行版区分，
+#     避免应用内更新把自用构建当作同版重装。
+
+name: 构建自用版本（fork）
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+
+  build:
+    name: 构建 Windows 版本
+    runs-on: windows-latest
+
+    outputs:
+      version_tag: ${{ steps.generate_version_info.outputs.version_tag }}
+      is_prerelease: ${{ steps.generate_version_info.outputs.is_prerelease }}
+      version_changelog: ${{ steps.generate_version_info.outputs.version_changelog }}
+
+    steps:
+      - name: 签出代码
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: 读取 Runtime 版本
+        run: |
+          $runtimeVersionFile = Join-Path '${{ github.workspace }}' 'res\runtime-version.txt'
+          $runtimeVersion = (Get-Content -LiteralPath $runtimeVersionFile -Raw).Trim()
+          if ($runtimeVersion -notmatch '^v\d+(\.\d+)*([-+][0-9A-Za-z.-]+)?$') {
+            throw "Runtime 版本格式无效：$runtimeVersion"
+          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "RUNTIME_VERSION=$runtimeVersion" -Encoding utf8
+          Write-Host "本次构建使用 Runtime $runtimeVersion"
+        shell: pwsh
+
+      - name: 设置 Node.js 环境
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '20'
+
+      - name: 标记自用版本号
+        run: |
+          # 仅在 runner 上给版本号追加 +fork.YYYYMMDD 后缀，不提交回仓库。
+          # 安装包文件名、Release tag 与应用内关于页会一起带上后缀；
+          # -beta 预发布判断（includes('-beta')）不受 build metadata 影响。
+          $tempScript = "temp_fork_version.js"
+          @'
+          const fs = require('fs');
+          const path = 'res/version.json';
+          const version = JSON.parse(fs.readFileSync(path, 'utf8'));
+          if (/[+].+/.test(version.version)) {
+              throw new Error('版本号已含构建后缀: ' + version.version);
+          }
+          const suffix = '+fork.' + new Date().toISOString().slice(0, 10).replaceAll('-', '');
+          version.version = version.version + suffix;
+          fs.writeFileSync(path, JSON.stringify(version, null, 4) + '\n', 'utf8');
+          console.log('自用版本号: ' + version.version);
+          '@ | Out-File -FilePath $tempScript -Encoding UTF8
+          node $tempScript
+          Remove-Item $tempScript
+        shell: pwsh
+
+      - name: 下载并校验 Runtime 可执行文件
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $runtimeDir = Join-Path "${{ github.workspace }}" 'runtime'
+          New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
+
+          $exeName = "auto-mas-runtime-$env:RUNTIME_VERSION.exe"
+
+          gh release download $env:RUNTIME_VERSION `
+            -R AUTO-MAS-Project/AUTO-MAS-Runtime `
+            -D $runtimeDir `
+            -p $exeName `
+            -p 'SHA256SUMS.txt' `
+            --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "下载 Runtime $env:RUNTIME_VERSION 失败"
+          }
+
+          Push-Location $runtimeDir
+          try {
+            $sumsLine = Select-String -Path 'SHA256SUMS.txt' -Pattern ([regex]::Escape($exeName)) |
+              Select-Object -First 1
+            if (-not $sumsLine) {
+              throw "SHA256SUMS.txt 中找不到 $exeName 对应的记录"
+            }
+            $expectedHash = ($sumsLine.Line -split '\s+')[0].ToUpperInvariant()
+            $actualHash = (Get-FileHash -Path $exeName -Algorithm SHA256).Hash.ToUpperInvariant()
+
+            Write-Host "期望哈希: $expectedHash"
+            Write-Host "实际哈希: $actualHash"
+
+            if ($actualHash -ne $expectedHash) {
+              throw "SHA-256 校验失败：$exeName 与 SHA256SUMS.txt 不匹配，可能下载损坏或被篡改"
+            }
+
+            # 校验通过后改成稳定文件名，Electron 侧固定按 auto-mas-runtime.exe 定位
+            # （见 frontend/electron/services/runtime/launchConfig.ts）。
+            Move-Item -Path $exeName -Destination 'auto-mas-runtime.exe' -Force
+            Remove-Item 'SHA256SUMS.txt'
+            Write-Host "Runtime $runtimeDir\auto-mas-runtime.exe 校验通过"
+          } finally {
+            Pop-Location
+          }
+        shell: pwsh
+
+      - name: 构建应用程序
+        run: |
+          cd frontend
+          corepack enable
+          corepack prepare yarn@4.9.1 --activate
+          yarn install
+          yarn build
+          Move-Item -Path "dist\win-unpacked\AUTO-MAS.exe" -Destination "..\AUTO-MAS.exe"
+        shell: pwsh
+
+      - name: 放入 Runtime 可执行文件
+        run: |
+          $target = 'frontend\dist\win-unpacked\resources'
+          New-Item -ItemType Directory -Force -Path $target | Out-Null
+          Copy-Item -Path 'runtime\auto-mas-runtime.exe' -Destination (Join-Path $target 'auto-mas-runtime.exe') -Force
+        shell: pwsh
+
+      - name: 生成版本信息
+        id: generate_version_info
+        run: |
+          $tempScript = "temp_version_script.js"
+          @'
+          const fs = require('fs');
+          const path = require('path');
+
+          let versionPath = '../res/version.json';
+          if (!fs.existsSync(versionPath)) {
+              versionPath = 'res/version.json';
+          }
+          const version = JSON.parse(fs.readFileSync(versionPath, 'utf8'));
+
+          function versionInfoMarkdown(info) {
+              let md = '';
+              for (const [key, values] of Object.entries(info)) {
+                  md += `## ${key}\n`;
+                  for (const v of values) md += `- ${v}\n`;
+              }
+              return md;
+          }
+
+          const versionTag = version.version;
+          const isPrerelease = versionTag.includes('-beta');
+
+          const allVersionInfo = {};
+          for (const v_i of Object.values(version.version_info)) {
+              for (const [key, value] of Object.entries(v_i)) {
+                  if (!allVersionInfo[key]) allVersionInfo[key] = [];
+                  allVersionInfo[key].push(...value);
+              }
+          }
+          const changelog = `<!--${JSON.stringify(version.version_info, null, 0)}-->\n${versionInfoMarkdown(allVersionInfo)}`;
+
+          const outputPath = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(outputPath, `version_tag=${versionTag}\n`);
+          fs.appendFileSync(outputPath, `is_prerelease=${isPrerelease}\n`);
+          fs.appendFileSync(outputPath, `version_changelog<<EOF\n${changelog}\nEOF\n`);
+          '@ | Out-File -FilePath $tempScript -Encoding UTF8
+
+          node $tempScript
+          Remove-Item $tempScript
+        shell: pwsh
+
+      - name: 准备 Inno Setup
+        run: |
+          choco install innosetup -y
+          echo "C:\Program Files (x86)\Inno Setup 6" >> $env:GITHUB_PATH
+          @"
+          #define MyAppName "AUTO-MAS"
+          #define MyAppVersion "${{ steps.generate_version_info.outputs.version_tag }}"
+          #define MyAppPublisher "AUTO-MAS Fork"
+          #define MyAppURL "https://github.com/${{ github.repository }}"
+          #define MyAppExeName "AUTO-MAS.exe"
+          #define MyAppPath "${{ github.workspace }}\frontend\dist\win-unpacked"
+          #define RootPath "${{ github.workspace }}"
+
+          [Setup]
+          AppId={{D116A92A-E174-4699-B777-61C5FD837B19}
+          AppName={#MyAppName}
+          AppVersion={#MyAppVersion}
+          AppVerName={#MyAppName}
+          AppPublisher={#MyAppPublisher}
+          AppPublisherURL={#MyAppURL}
+          AppSupportURL={#MyAppURL}
+          AppUpdatesURL={#MyAppURL}
+          DefaultDirName={autopf}\{#MyAppName}
+          UninstallDisplayIcon={app}\{#MyAppExeName}
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+          DisableProgramGroupPage=yes
+          LicenseFile={#RootPath}\LICENSE
+          PrivilegesRequired=admin
+          OutputDir={#RootPath}
+          OutputBaseFilename=AUTO-MAS-Setup
+          SetupIconFile={#RootPath}\res\icons\AUTO-MAS.ico
+          SolidCompression=yes
+          WizardStyle=modern
+          AppMutex=AUTO_MAS_Installer_Mutex
+
+          [Languages]
+          Name: "Chinese"; MessagesFile: "{#RootPath}\res\docs\ChineseSimplified.isl"
+          Name: "English"; MessagesFile: "compiler:Default.isl"
+
+          [Tasks]
+          Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+
+          [Files]
+          Source: "{#MyAppPath}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+          [Icons]
+          Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+          Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+          [Run]
+          Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall runascurrentuser
+
+          [Code]
+
+          procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+          begin
+            if CurUninstallStep = usPostUninstall then
+            begin
+              DelTree(ExpandConstant('{app}'), True, True, True);
+            end;
+          end;
+          "@ | Out-File -FilePath AUTO-MAS.iss -Encoding UTF8
+        shell: pwsh
+
+      - name: 构建精简安装包
+        run: |
+          iscc AUTO-MAS.iss
+          Rename-Item -Path AUTO-MAS-Setup.exe -NewName AUTO-MAS-Lite-Setup.exe
+          Compress-Archive -Path .\frontend\dist\win-unpacked\* -DestinationPath AUTO-MAS-Lite-${{ steps.generate_version_info.outputs.version_tag }}-x64.zip -Force
+        shell: pwsh
+
+      - name: 缓存完整环境
+        id: cache-environment
+        uses: actions/cache@v6.1.0
+        with:
+          path: environment.zip
+          key: environment-zip
+
+      - name: 下载完整环境
+        if: steps.cache-environment.outputs.cache-hit != 'true'
+        run: Invoke-WebRequest -Uri https://download.auto-mas.top/d/AUTO-MAS/Environment/environment.zip -OutFile environment.zip
+
+      - name: 部署完整环境
+        run: Expand-Archive -Path environment.zip -DestinationPath .\frontend\dist\win-unpacked -Force
+        shell: pwsh
+
+      - name: 构建完整安装包
+        run: |
+          iscc AUTO-MAS.iss
+          Rename-Item -Path AUTO-MAS-Setup.exe -NewName AUTO-MAS-Full-Setup.exe
+          Compress-Archive -Path .\frontend\dist\win-unpacked\* -DestinationPath AUTO-MAS-Full-${{ steps.generate_version_info.outputs.version_tag }}-x64.zip -Force
+        shell: pwsh
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: build-artifacts
+          path: |
+            AUTO-MAS-Lite-Setup.exe
+            AUTO-MAS-Full-Setup.exe
+            AUTO-MAS-*-x64.zip
+          retention-days: 30
+
+  release:
+    name: 发布自用发行版
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: build-artifacts
+          path: artifacts
+
+      - name: 发布发行版
+        uses: softprops/action-gh-release@v3.0.2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ needs.build.outputs.version_tag }}
+          body: |
+            ${{ needs.build.outputs.version_changelog }}
+
+            ## 说明
+
+            自用 fork 构建（分支 ${{ github.ref_name }}），未做代码签名；
+            安装时如遇 SmartScreen 提示，选择「更多信息 → 仍要运行」即可。
+
+            应用内更新检查指向上游仓库，上游发布新版本时会出现更新提示；
+            忽略提示即可保留本分支的自用功能。
+          files: artifacts/*
+          prerelease: ${{ needs.build.outputs.is_prerelease }}
