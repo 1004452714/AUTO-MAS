@@ -711,6 +711,19 @@ STARRAIL_PACKAGE_NAME = {
 }
 """崩坏·星穹铁道包名映射表"""
 
+STARRAIL_VERSION_API_URL = (
+    "https://hyp-api.mihoyo.com/hyp/hyp-connect/api/getGamePackages"
+    "?launcher_id=jGHBHlcOq1&game_ids[]=64kMb5iAWu"
+)
+"""崩坏·星穹铁道国服 HoYoPlay 启动器版本接口，
+取 ``data.game_packages[0].main.major.version`` 为当前客户端版本号"""
+
+STARRAIL_OFFICIAL_APK_URL = (
+    "https://act-api-takumi.mihoyo.com/event/download_porter/link"
+    "/hkrpg_cn/official/android_default"
+)
+"""崩坏·星穹铁道国服官服安卓安装包下载入口，跟随重定向取真实下载地址"""
+
 STARRAIL_STAGE_BOOK = {
     "-": "禁用",
     "Calyx_Golden_Memories_Planarcadia": "材料：角色经验（回忆之蕾 二相乐园）",

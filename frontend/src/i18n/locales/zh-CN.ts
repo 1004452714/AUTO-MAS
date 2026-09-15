@@ -1011,6 +1011,8 @@ export default {
     couldNotStartMaa: '启动MAA配置失败',
     couldNotStartSrc: '启动SRC配置失败',
     checkGameUpdateBefore: '启动前检查游戏更新',
+    checkGameUpdateBeforeLogin:
+      '开启后，登录游戏前先比对服务端与模拟器内的游戏客户端版本。客户端版本落后时游戏会停在强制更新界面，导致登录一直卡住',
     updateAutomaticallyBeforeLaunching: '启动前自动更新',
     waitAfterLaunchSeconds: '启动后等待时间（秒）',
     launchMode: '启动方式',

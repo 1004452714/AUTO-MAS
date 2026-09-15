@@ -1042,6 +1042,8 @@ export default {
     couldNotStartMaa: 'Could not start the MAA configuration',
     couldNotStartSrc: 'Could not start the SRC configuration',
     checkGameUpdateBefore: 'Check for a game update before launching',
+    checkGameUpdateBeforeLogin:
+      'When enabled, the game client version is compared between the server and the emulator before logging in. An outdated client gets stuck on the force-update screen during login',
     updateAutomaticallyBeforeLaunching: 'Update automatically before launching',
     waitAfterLaunchSeconds: 'Wait after launch (seconds)',
     launchMode: 'Launch mode',

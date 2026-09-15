@@ -1002,6 +1002,8 @@ export default {
     couldNotStartMaa: 'MAA の設定を開始できませんでした',
     couldNotStartSrc: 'SRC の設定を開始できませんでした',
     checkGameUpdateBefore: '起動前にゲームの更新を確認',
+    checkGameUpdateBeforeLogin:
+      '有効にすると、ゲームにログインする前にサーバーとエミュレーター内のゲームクライアントのバージョンを比較します。クライアントが古いと強制更新画面でログインが止まります',
     updateAutomaticallyBeforeLaunching: '起動前に自動更新',
     waitAfterLaunchSeconds: '起動後の待機時間（秒）',
     launchMode: '起動方式',
