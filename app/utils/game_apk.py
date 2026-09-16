@@ -33,6 +33,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urljoin
 
 import aiofiles
 import httpx
@@ -140,6 +141,50 @@ def is_client_outdated(installed: str, remote: str) -> bool:
     installed_parts += (0,) * (length - len(installed_parts))
     remote_parts += (0,) * (length - len(remote_parts))
     return installed_parts < remote_parts
+
+
+_VERSION_IN_NAME_RE = re.compile(r"(\d+(?:\.\d+)+)")
+"""从下载地址的文件名中匹配版本号，形如 ``StarRail_4.5.0.apk``；
+文件名以版本号开头时同样可匹配"""
+
+
+async def resolve_download_link(url: str) -> tuple[str, str] | None:
+    """跟随重定向取真实下载地址，并从文件名解析出客户端版本号。
+
+    各游戏的下载入口多为 302 跳转，最终地址的文件名里通常就带着客户端版本号。
+    由此取到的版本与将下载的安装包必然同源同版本，不会出现"版本接口与安装包
+    版本不一致"的情况（例如 PC 启动器包与安卓 APK 本就不同步）。
+
+    Args:
+        url: 下载入口（302 跳转至 CDN 真实地址）。
+
+    Returns:
+        tuple[str, str] | None: ``(最终地址, 版本号)``；未发生跳转、请求失败或
+        解析不出版本号时返回 ``None``。
+    """
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=False) as client:
+            response = await client.get(url, timeout=15.0)
+            location = response.headers.get("location")
+    except Exception as e:
+        logger.warning(f"解析下载地址失败: {e}")
+        return None
+
+    if not location:
+        logger.warning(f"下载入口未返回重定向地址: {url}")
+        return None
+
+    # 入口可能给出相对地址，按入口本身补全
+    final_url = urljoin(str(response.request.url), location)
+
+    match = _VERSION_IN_NAME_RE.search(final_url.rsplit("/", 1)[-1])
+    if match is None:
+        logger.warning(f"未能从下载地址解析出版本号: {final_url}")
+        return None
+
+    logger.info(f"解析到下载地址 {final_url}，客户端版本 {match.group(1)}")
+    return final_url, match.group(1)
 
 
 async def download_apk(

@@ -18,71 +18,87 @@
 
 #   Contact: DLmaster_361@163.com
 
-"""模拟器层面接管崩坏·星穹铁道（国服官服）客户端更新。
+"""模拟器层面接管崩坏·星穹铁道客户端更新。
 
 SRC 拉起游戏前由 MAS 负责登录，客户端 APK 版本落后时游戏会弹出强制更新门，
-登录流程会一直卡住。本模块在启动模拟器后、登录前比对版本，
-官服可直接下载安装包并通过 adb 安装（先例见 ``app/task/MAA/tools/game_update.py``）。
+登录流程会一直卡住。本模块在启动模拟器后、登录前比对版本。
 
-渠道服（B 服）与国际服没有公开的版本接口和官方安卓直链，一律提示手动更新。
+版本与安装包**同源**：向服务器对应的下载入口发一次不跟随重定向的请求，
+从 302 的 ``Location`` 里同时取到真实下载地址与版本号。这样不会出现
+"版本接口与安装包版本不一致"的问题——PC 启动器包与安卓 APK 本就不同步。
+
+只有配置了更新入口的服务器才做检查（当前为国服官服，入口跳转至安卓 APK，
+可直接下载并通过 adb 安装），其余服务器跳过检查、交回原有登录流程判定。
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 
-import httpx
-
 from app.utils import get_logger
-from app.utils.constants import (
-    STARRAIL_OFFICIAL_APK_URL,
-    STARRAIL_VERSION_API_URL,
-)
+from app.utils.constants import STARRAIL_UPDATE_LINK_SERVER
 from app.utils.game_apk import (
     GameUpdateResult,
     download_apk,
     get_installed_client_version,
     install_apk,
     is_client_outdated,
+    resolve_download_link,
 )
 
 logger = get_logger("SRC 游戏更新")
 
-_OFFICIAL_SERVER = "CN-Official"
+_APK_SUFFIX = ".apk"
 
-__all__ = ["ensure_game_updated", "fetch_game_version"]
+__all__ = ["UpdateSource", "ensure_game_updated", "fetch_update_source"]
 
 
-async def fetch_game_version() -> str | None:
-    """拉取国服当前客户端版本号。
+@dataclass
+class UpdateSource:
+    """从下载入口解析出的更新信息"""
+
+    version: str
+    """服务端当前客户端版本号，形如 ``4.5.0``"""
+    download_url: str
+    """302 跳转后的真实下载地址"""
+    can_auto_install: bool
+    """该地址是否为可直接安装的安卓安装包"""
+
+
+async def fetch_update_source(server: str) -> UpdateSource | None:
+    """拉取指定服务器的更新信息。
+
+    Args:
+        server: 用户配置的游戏服务器标识。
 
     Returns:
-        str | None: 版本号（形如 ``4.4.0``）；请求失败时返回 ``None``。
+        UpdateSource | None: 更新信息；服务器无公开入口或请求失败时返回 ``None``。
     """
 
-    try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            response = await client.get(STARRAIL_VERSION_API_URL, timeout=15.0)
-            response.raise_for_status()
-            data = response.json()
-    except Exception as e:
-        logger.warning(f"获取崩坏·星穹铁道版本失败: {e}")
+    link_url = STARRAIL_UPDATE_LINK_SERVER.get(server)
+    if link_url is None:
+        logger.info(f"服务器 {server} 无公开的更新入口，跳过客户端版本检查")
         return None
 
-    try:
-        game_packages = data["data"]["game_packages"]
-        version = str(game_packages[0]["main"]["major"]["version"]).strip()
-    except (KeyError, IndexError, TypeError):
-        logger.warning(f"版本接口返回了无法解析的结构: {data}")
+    resolved = await resolve_download_link(link_url)
+    if resolved is None:
+        logger.warning(f"服务器 {server} 的更新入口未能解析出下载地址与版本号")
         return None
 
-    if not version:
-        logger.warning(f"版本接口未返回客户端版本号: {data}")
-        return None
+    download_url, version = resolved
+    can_auto_install = download_url.lower().split("?", 1)[0].endswith(_APK_SUFFIX)
 
-    logger.info(f"崩坏·星穹铁道国服当前版本: {version}")
-    return version
+    logger.info(
+        f"崩坏·星穹铁道服务器 {server} 当前版本: {version}"
+        f"（{'可自动安装' if can_auto_install else '无可安装的安卓安装包'}）"
+    )
+    return UpdateSource(
+        version=version,
+        download_url=download_url,
+        can_auto_install=can_auto_install,
+    )
 
 
 async def ensure_game_updated(
@@ -116,10 +132,11 @@ async def ensure_game_updated(
         logger.warning("未取到模拟器 adb 地址，跳过游戏版本检查")
         return GameUpdateResult("Skipped", "未取到模拟器 adb 地址，跳过游戏版本检查")
 
-    remote = await fetch_game_version()
-    if remote is None:
-        return GameUpdateResult("Skipped", "版本接口不可用，跳过游戏版本检查")
+    source = await fetch_update_source(server)
+    if source is None:
+        return GameUpdateResult("Skipped", "更新入口不可用，跳过游戏版本检查")
 
+    remote = source.version
     installed = await get_installed_client_version(adb_path, adb_address, package_name)
     if installed is None:
         # 读不到已安装版本可能是游戏未安装，也可能是 adb 临时异常，
@@ -132,10 +149,10 @@ async def ensure_game_updated(
     outdated_text = f"游戏客户端版本落后（已安装 {installed}，最新 {remote}）"
     logger.info(outdated_text)
 
-    if server != _OFFICIAL_SERVER:
+    if not source.can_auto_install:
         return GameUpdateResult(
             "NeedManualUpdate",
-            f"{outdated_text}，当前仅国服官服支持自动更新，请手动更新游戏后重试",
+            f"{outdated_text}，更新入口未提供安卓安装包直链，请手动更新游戏后重试",
         )
 
     if not if_auto_install:
@@ -144,11 +161,11 @@ async def ensure_game_updated(
             f"{outdated_text}，未开启自动安装，请手动更新游戏后重试",
         )
 
-    apk_path = apk_dir / f"hsr-official-{remote}.apk"
+    apk_path = apk_dir / f"hkrpg-{remote}.apk"
     try:
         if progress is not None:
             await progress(f"{outdated_text}\n正在下载游戏安装包")
-        await download_apk(STARRAIL_OFFICIAL_APK_URL, apk_path, progress)
+        await download_apk(source.download_url, apk_path, progress)
 
         if progress is not None:
             await progress(f"{outdated_text}\n正在安装游戏安装包")

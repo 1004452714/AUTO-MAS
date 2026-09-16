@@ -35,7 +35,7 @@ from .config import (
     validate_src_installation,
     write_src_config_snapshot_state,
 )
-from .game_update import ensure_game_updated, fetch_game_version
+from .game_update import UpdateSource, ensure_game_updated, fetch_update_source
 from .login import login
 from .notify import push_notification
 from .poor_yaml import poor_yaml_read, poor_yaml_write
@@ -58,7 +58,8 @@ __all__ = [
     "validate_src_cleanup_paths",
     "write_src_process_state",
     "ensure_game_updated",
-    "fetch_game_version",
+    "fetch_update_source",
+    "UpdateSource",
     "login",
     "push_notification",
     "poor_yaml_read",

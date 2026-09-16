@@ -1108,7 +1108,7 @@ export default {
     whenThisScriptRuns:
       'When this script runs in a queue, the M9A resource version is updated after every user task finishes. Open M9A first and configure the update source',
     whenClientDetectedAs:
-      'When the client is detected as out of date, MAS downloads the package and installs it over ADB, then continues the run. CN servers only; the package is around 2 GB, so make sure you have the disk space',
+      'When the client is detected as out of date, MAS downloads the package and installs it over ADB, then continues the run. CN official server only; the package is around 2 GB, so make sure you have the disk space',
     updateAutomaticallyBeforeEvery: 'Update automatically before every run?',
     forceGameClose: 'Force the game to close',
     currentOkWwInstall:
@@ -1375,7 +1375,8 @@ export default {
       'Configuration uploaded — it will be visible to everyone once it is approved',
     scriptConfigurationFileType: 'Script configuration file type',
     automaticSaveFailedSave: 'Automatic save failed — save it manually',
-    installGamePackageAutomatically: 'Install the game package automatically (CN servers only)',
+    installGamePackageAutomatically:
+      'Install the game package automatically (CN official server only)',
     whetherGameClosesAfter: 'Whether the game closes after the auto-login task',
     urlCustomProtocol: 'URL of the custom protocol',
     ifFailureLogAppears: 'If a failure log appears before a success log, the task counts as failed',
