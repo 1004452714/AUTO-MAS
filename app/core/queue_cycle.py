@@ -40,7 +40,13 @@ WEEKDAY_NAMES = (
 
 @dataclass(frozen=True)
 class CycleEntry:
-    """循环队列中一个待运行的队列项。"""
+    """循环队列中一个待运行的队列项。
+
+    ``sibling_queue_item_ids`` 列出与本 entry 同并行组的其他 QueueItem 的
+    id（不含本 entry 自身）。只有行首 entry 携带非空列表；行内其他 entry
+    该字段为空。``_run_due_entries`` 据此判定一行只触发一次执行，并按邻接
+    下标构造并行组，复用 Task 的 _run_script_group 调度。
+    """
 
     queue_item_id: str
     script_id: str
@@ -48,6 +54,7 @@ class CycleEntry:
     index: int  # 在任务脚本列表中的下标
     next_run_at: datetime
     is_due: bool
+    sibling_queue_item_ids: tuple[str, ...] = ()
 
 
 def format_cycle_time(value: datetime) -> str:
@@ -186,16 +193,34 @@ def collect_cycle_entries(queue, script_config, now: datetime) -> list[CycleEntr
     ``index`` 必须与任务脚本列表对齐，所以过滤条件要和建任务时完全一致：
     先按 ``_TaskManager._queue_script_ids`` 去掉未选脚本，再按 ``Task.prepare``
     去掉已被删除的脚本；两步都会推进下标，之后才轮到「是否启用循环」。
+
+    行的语义沿用 ``_split_parallel_groups``：连续 ``Info.Parallel=True`` 的
+    项属于同一行（行首除外）。每个 row 产出 **一个 entry**，行首 entry 的
+    ``sibling_queue_item_ids`` 列出行内其他 QueueItem 的 id（不含行首）；
+    行内非行首项不再单独产出 entry，由 ``_run_cycle_entry_group`` 复用并行
+    组调度。
+
+    行内任一项 ``Schedule.Enabled=False`` 或解析不出下次运行时间，整行作废。
     """
 
-    entries: list[CycleEntry] = []
-    index = -1
+    # 第一遍：按 Parallel 标志分好行，存 (head_index, head_qid, [sibling_qid,...])
+    # 第二遍：对每行做 schedule 校验，合格的产出 entry
+    rows: list[tuple[int, str, list[str]]] = []
+    current_head_index: int | None = None
+    current_head_qid: str | None = None
+    current_siblings: list[str] = []
 
+    def _close_row() -> None:
+        nonlocal current_head_index, current_head_qid, current_siblings
+        if current_head_qid is not None and current_head_index is not None:
+            rows.append((current_head_index, current_head_qid, current_siblings))
+        current_head_index, current_head_qid, current_siblings = None, None, []
+
+    index = -1
     for queue_item_id, queue_item in queue.QueueItem.items():
         script_id = str(queue_item.get("Info", "ScriptId") or "").strip()
         if not script_id or script_id == "-":
             continue
-
         try:
             script_uid = uuid.UUID(script_id)
         except ValueError:
@@ -204,21 +229,49 @@ def collect_cycle_entries(queue, script_config, now: datetime) -> list[CycleEntr
             continue
 
         index += 1
+        is_parallel = bool(queue_item.get("Info", "Parallel"))
 
-        if not queue_item.get("Schedule", "Enabled"):
-            continue
+        # 行的边界只看 Parallel 标志；schedule 状态留给下一遍判断
+        if current_head_qid is None or not is_parallel:
+            _close_row()
+            current_head_index = index
+            current_head_qid = str(queue_item_id)
+            current_siblings = []
+        else:
+            current_siblings.append(str(queue_item_id))
 
-        next_run_at = resolve_next_run(queue_item, now)
-        if next_run_at is None:
+    _close_row()
+
+    # 第二遍：每行做 schedule 校验；任一项不合格整行丢弃
+    entries: list[CycleEntry] = []
+    for head_index, head_qid, sibling_qids in rows:
+        head_item = queue.QueueItem[uuid.UUID(head_qid)]
+        head_script_uid = uuid.UUID(
+            str(head_item.get("Info", "ScriptId") or "").strip()
+        )
+        all_ok = bool(head_item.get("Schedule", "Enabled"))
+        next_run_at = resolve_next_run(head_item, now) if all_ok else None
+        for sib_qid in sibling_qids:
+            if not all_ok:
+                break
+            sib_item = queue.QueueItem[uuid.UUID(sib_qid)]
+            if not bool(sib_item.get("Schedule", "Enabled")):
+                all_ok = False
+                break
+            if resolve_next_run(sib_item, now) is None:
+                all_ok = False
+                break
+        if not all_ok or next_run_at is None:
             continue
         entries.append(
             CycleEntry(
-                queue_item_id=str(queue_item_id),
-                script_id=script_id,
-                script_name=script_config[script_uid].get("Info", "Name"),
-                index=index,
+                queue_item_id=head_qid,
+                script_id=str(head_script_uid),
+                script_name=script_config[head_script_uid].get("Info", "Name"),
+                index=head_index,
                 next_run_at=next_run_at,
                 is_due=next_run_at <= now,
+                sibling_queue_item_ids=tuple(sibling_qids),
             )
         )
 

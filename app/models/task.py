@@ -94,6 +94,9 @@ class ScriptItem:
     user_list: List[UserItem] = field(default_factory=list)  # 用户信息列表
     current_index: int = -1  # 当前执行的用户索引，-1 表示未开始
     log: str = ""  # 脚本执行日志
+    # 是否与上一脚本并行执行；仅队列任务在构建 script_list 时按下标注入，
+    # 非队列任务恒为 False。前端任务概览按它与脚本状态渲染并行分组
+    parallel: bool = False
     _task_item_ref: Optional[weakref.ReferenceType[TaskItem]] = None
 
     def __setattr__(self, name, value):
@@ -256,6 +259,7 @@ class TaskItem(ABC):
                 "script_id": script_item.script_id,
                 "name": script_item.name,
                 "status": script_item.status,
+                "parallel": script_item.parallel,
                 "userList": [
                     {
                         "user_id": user_item.user_id,

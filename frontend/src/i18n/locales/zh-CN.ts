@@ -3129,11 +3129,14 @@ export default {
       add: '添加任务',
       colIndex: '序号',
       colScript: '脚本任务',
-      colDays: '运行周几',
       colActions: '操作',
       dragSort: '拖拽排序',
       selectScript: '请选择脚本',
       deleteConfirm: '确定要删除这个任务吗？',
+      deleteRowConfirm: '确定要删除整个批次吗？批次内所有任务都会被删除',
+      addScript: '添加',
+      addScriptTip:
+        '在本批次里再添加一个脚本，与本批次的其他脚本同时运行；循环队列下则与本批次的执行周期同步触发',
     },
     cycle: {
       colConfig: '循环配置',
@@ -3243,12 +3246,15 @@ export default {
       title: '日志',
       follow: '保持最新',
       browse: '自由浏览',
+      followScript: '跟随任务',
       empty: '暂无数据',
       truncated: '前方日志较长，调度台仅显示最近内容；完整日志仍会写入历史记录。',
     },
     overview: {
       title: '任务总览',
       unknownScript: '未知脚本',
+      parallelGroup: '并行组 {n}',
+      serialDivider: '串行 · 等待上一组完成',
     },
     modal: {
       cannotDeleteTitle: '无法删除调度台',

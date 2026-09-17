@@ -88,6 +88,8 @@ export interface WSTaskScriptInfoData {
   script_id: string
   name: string
   status: string
+  /** 是否与上一脚本并行执行；供任务总览按并行组分区展示 */
+  parallel?: boolean
   userList: WSTaskUserInfoData[]
 }
 
@@ -125,6 +127,8 @@ export interface WSTaskLogUpdatedData {
   log: string
   seq: number
   append: boolean
+  /** 并行运行时各运行中脚本的日志，键为脚本 ID；单脚本运行时为空 */
+  scriptLogs?: Record<string, string>
 }
 
 /** 任务完成消息数据 (type=task.completed) */

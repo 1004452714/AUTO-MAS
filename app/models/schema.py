@@ -1355,6 +1355,9 @@ class QueueItem_Info(BaseModel):
     ScriptId: Optional[str] = Field(
         default=None, description="任务所对应的脚本ID, 为None时表示未选择"
     )
+    Parallel: Optional[bool] = Field(
+        default=None, description="是否与上一队列项并行执行"
+    )
 
 
 class QueueItem_Schedule(BaseModel):
@@ -4968,6 +4971,9 @@ class WSTaskScriptInfoData(BaseModel):
     script_id: str = Field(..., description="脚本 ID")
     name: str = Field(..., description="脚本名称")
     status: str = Field(..., description="脚本执行状态")
+    parallel: bool = Field(
+        default=False, description="是否与上一脚本并行执行; 供前端按并行组分区展示"
+    )
     userList: List[WSTaskUserInfoData] = Field(
         default_factory=list, description="脚本下的用户状态"
     )
@@ -5001,6 +5007,10 @@ class WSTaskLogUpdatedData(BaseModel):
     log: str = Field(default="", description="append 为真时是新增片段, 否则是完整日志")
     seq: int = Field(default=0, description="推送序号, 每个任务独立, 从 1 起单调递增")
     append: bool = Field(default=False, description="是否追加到已有日志, 否则整体替换")
+    scriptLogs: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="并行运行时各运行中脚本的日志, 键为脚本 ID; 单脚本运行时为空",
+    )
 
 
 class WSTaskScriptIdentityData(BaseModel):
@@ -5033,6 +5043,10 @@ class TaskRuntimeSnapshotItem(BaseModel):
     )
     log: str = Field(default="", description="已推送的脚本日志, 与下一条增量推送衔接")
     logSeq: int = Field(default=0, description="已推送日志对应的推送序号")
+    scriptLogs: Dict[str, str] = Field(
+        default_factory=dict,
+        description="并行运行时各运行中脚本的日志, 键为脚本 ID; 单脚本运行时为空",
+    )
 
 
 class TaskRuntimeSnapshot(BaseModel):

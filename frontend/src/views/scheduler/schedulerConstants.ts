@@ -16,6 +16,8 @@ export interface Script {
   script_id: string
   status: string
   name: string
+  /** 是否与上一脚本并行执行；供任务总览按并行组分区展示 */
+  parallel?: boolean
   user_list: User[]
 }
 
@@ -84,4 +86,8 @@ export interface SchedulerTab {
   isCycleQueue?: boolean
   // 循环运行的待运行条目预览
   cycleNextList?: WSTaskCyclePreviewData[]
+  // 并行运行时各脚本的独立日志，键为脚本 ID；单脚本运行时为空
+  scriptLogs?: Record<string, string>
+  // 日志面板当前查看的脚本：'auto' 跟随主日志，其余为钉选的脚本 ID
+  logScriptSelection?: string
 }

@@ -2779,11 +2779,14 @@ export default {
       add: 'タスクを追加',
       colIndex: '番号',
       colScript: 'スクリプトタスク',
-      colDays: '実行曜日',
       colActions: '操作',
       dragSort: 'ドラッグして並び替え',
       selectScript: 'スクリプトを選択してください',
       deleteConfirm: 'このタスクを削除しますか？',
+      deleteRowConfirm: 'バッチ全体を削除しますか？バッチ内のすべてのタスクが削除されます',
+      addScript: '追加',
+      addScriptTip:
+        'このバッチにスクリプトを追加します。同じバッチの他スクリプトと同時に実行されます。循環キューではバッチの実行周期に同期して起動します',
     },
     cycle: {
       colConfig: '循環設定',
@@ -2896,6 +2899,7 @@ export default {
       title: 'ログ',
       follow: '自動追従',
       browse: '自由スクロール',
+      followScript: 'タスクに追従',
       empty: 'データがありません',
       truncated:
         'ログが長いため、コンソールには直近の内容のみ表示しています。完全なログは履歴に記録されます。',
@@ -2903,6 +2907,8 @@ export default {
     overview: {
       title: 'タスク概要',
       unknownScript: '不明なスクリプト',
+      parallelGroup: '並列グループ {n}',
+      serialDivider: '直列 · 前のグループの完了を待機',
     },
     modal: {
       cannotDeleteTitle: 'このコンソールは閉じられません',

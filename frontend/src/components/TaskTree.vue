@@ -8,46 +8,84 @@
       </div>
     </div>
     <div v-else class="task-tree">
-      <div v-for="script in taskData" :key="`script-${script.script_id}`" class="script-card">
-        <!-- 脚本级别 -->
-        <div class="script-header" @click="toggleScript(script.script_id)">
-          <div class="script-content">
-            <div class="script-info">
-              <CaretDownOutlined v-if="expandedScripts.has(script.script_id)" class="expand-icon" />
-              <CaretRightOutlined v-else class="expand-icon" />
-              <span class="script-name">{{ script.name }}</span>
-              <span v-if="script.user_list && script.user_list.length > 0" class="user-count">
-                ({{ script.user_list.length }}个用户)
-              </span>
-            </div>
-            <a-tag :color="getStatusColor(script.status)" size="small" class="status-tag">
-              {{ statusLabel(script.status) }}
-            </a-tag>
-          </div>
+      <template v-for="(group, groupIndex) in taskGroups" :key="`group-${groupIndex}`">
+        <!-- 组间串行分隔：仅存在并行组时展示 -->
+        <div v-if="groupIndex > 0 && hasParallelGroups" class="parallel-serial-divider">
+          <span class="divider-arrow">↓</span>
+          <span>{{ t('scheduler.overview.serialDivider') }}</span>
         </div>
 
-        <!-- 用户列表 -->
-        <div v-show="expandedScripts.has(script.script_id)" class="user-list">
-          <div v-if="!script.user_list || script.user_list.length === 0" class="no-users">
-            <div class="no-users-content">
-              <span class="no-users-text">{{ t('comp.noUsersYet') }}</span>
-            </div>
+        <!-- 并行组容器：单任务组保持与原平铺一致的视觉 -->
+        <div
+          class="parallel-group"
+          :class="{ 'parallel-group-multi': group.items.length > 1 }"
+        >
+          <div v-if="group.items.length > 1" class="parallel-group-header">
+            <a-tag color="processing" class="parallel-group-badge">
+              {{
+                t('scheduler.overview.parallelGroup', {
+                  n: parallelGroupNumbers.get(groupIndex),
+                })
+              }}
+            </a-tag>
           </div>
           <div
-            v-for="(user, index) in script.user_list"
-            :key="`user-${script.script_id}-${user.user_id}`"
-            class="user-item"
-            :class="{ 'last-item': index === script.user_list.length - 1 }"
+            class="parallel-group-body"
+            :class="{ 'parallel-group-grid': group.items.length > 1 }"
           >
-            <div class="user-content">
-              <span class="user-name">{{ user.name }}</span>
-              <a-tag :color="getStatusColor(user.status)" size="small" class="status-tag">
-                {{ statusLabel(user.status) }}
-              </a-tag>
+            <div
+              v-for="script in group.items"
+              :key="`script-${script.script_id}`"
+              class="script-card"
+            >
+              <!-- 脚本级别 -->
+              <div class="script-header" @click="toggleScript(script.script_id)">
+                <div class="script-content">
+                  <div class="script-info">
+                    <CaretDownOutlined
+                      v-if="expandedScripts.has(script.script_id)"
+                      class="expand-icon"
+                    />
+                    <CaretRightOutlined v-else class="expand-icon" />
+                    <span class="script-name">{{ script.name }}</span>
+                    <span
+                      v-if="script.user_list && script.user_list.length > 0"
+                      class="user-count"
+                    >
+                      ({{ script.user_list.length }}个用户)
+                    </span>
+                  </div>
+                  <a-tag :color="getStatusColor(script.status)" size="small" class="status-tag">
+                    {{ statusLabel(script.status) }}
+                  </a-tag>
+                </div>
+              </div>
+
+              <!-- 用户列表 -->
+              <div v-show="expandedScripts.has(script.script_id)" class="user-list">
+                <div v-if="!script.user_list || script.user_list.length === 0" class="no-users">
+                  <div class="no-users-content">
+                    <span class="no-users-text">{{ t('comp.noUsersYet') }}</span>
+                  </div>
+                </div>
+                <div
+                  v-for="(user, index) in script.user_list"
+                  :key="`user-${script.script_id}-${user.user_id}`"
+                  class="user-item"
+                  :class="{ 'last-item': index === script.user_list.length - 1 }"
+                >
+                  <div class="user-content">
+                    <span class="user-name">{{ user.name }}</span>
+                    <a-tag :color="getStatusColor(user.status)" size="small" class="status-tag">
+                      {{ statusLabel(user.status) }}
+                    </a-tag>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
-      </div>
+      </template>
     </div>
   </div>
 </template>
@@ -55,9 +93,10 @@
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
 import { CaretDownOutlined, CaretRightOutlined } from '@ant-design/icons-vue'
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import { useStatusLabel } from '@/i18n/status'
+import { splitParallelGroups } from '@/utils/parallelGroups'
 
 const { t } = useI18n()
 
@@ -75,6 +114,8 @@ interface Script {
   script_id: string
   status: string
   name: string
+  /** 是否与上一脚本并行执行；后端为每任务冻结的队列项并行标志 */
+  parallel?: boolean
   user_list: User[]
 }
 
@@ -86,6 +127,24 @@ const props = defineProps<Props>()
 
 // 展开的脚本集合
 const expandedScripts = ref<Set<string>>(new Set())
+
+// 与后端 _split_parallel_groups 同口径归组；全部为单任务组时渲染结构与原平铺一致
+const taskGroups = computed(() => splitParallelGroups(props.taskData))
+
+const hasParallelGroups = computed(() => taskGroups.value.some(group => group.items.length > 1))
+
+// 多任务组的「并行组 N」编号，只数并行组
+const parallelGroupNumbers = computed(() => {
+  const map = new Map<number, number>()
+  let count = 0
+  taskGroups.value.forEach((group, groupIndex) => {
+    if (group.items.length > 1) {
+      count += 1
+      map.set(groupIndex, count)
+    }
+  })
+  return map
+})
 
 // 切换脚本展开状态
 const toggleScript = (scriptId: string) => {
@@ -192,6 +251,49 @@ defineExpose({
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+/* 并行组容器：单任务组中性渲染，多任务组用主题色描边强调 */
+.parallel-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.parallel-group-multi {
+  border: 1px solid var(--ant-color-primary-border);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--ant-color-fill-quaternary);
+}
+
+.parallel-group-header {
+  display: flex;
+  align-items: center;
+}
+
+.parallel-group-badge {
+  margin: 0;
+}
+
+.parallel-group-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.parallel-serial-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ant-color-text-secondary);
+  padding: 0 4px;
+}
+
+.divider-arrow {
+  color: var(--ant-color-text-tertiary);
 }
 
 .script-card {

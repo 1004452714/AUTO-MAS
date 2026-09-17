@@ -7,5 +7,9 @@ export type QueueItem_Info = {
      * 任务所对应的脚本ID, 为None时表示未选择
      */
     ScriptId?: (string | null);
+    /**
+     * 是否与上一队列项并行执行
+     */
+    Parallel?: (boolean | null);
 };
 

@@ -18,9 +18,6 @@
         <div class="header-cell drag-cell"></div>
         <div class="header-cell index-cell">{{ t('queue.item.colIndex') }}</div>
         <div class="header-cell script-cell">{{ t('queue.item.colScript') }}</div>
-        <div v-if="!showCycleConfig" class="header-cell days-cell">
-          {{ t('queue.item.colDays') }}
-        </div>
         <div v-if="showCycleConfig" class="header-cell cycle-cell">
           {{ t('queue.cycle.colConfig') }}
         </div>
@@ -29,9 +26,9 @@
 
       <!-- 拖拽内容区域 -->
       <draggable
-        v-model="queueItems"
+        v-model="rows"
         group="queueItems"
-        item-key="id"
+        item-key="key"
         :animation="200"
         :disabled="loading || locked"
         ghost-class="ghost"
@@ -41,7 +38,7 @@
         class="draggable-container"
         @end="onDragEnd"
       >
-        <template #item="{ element: record, index }">
+        <template #item="{ element: row, index }">
           <div class="draggable-row" :class="{ 'row-dragging': loading }">
             <div class="row-cell drag-cell">
               <span
@@ -54,54 +51,53 @@
             </div>
             <div class="row-cell index-cell">{{ index + 1 }}</div>
             <div class="row-cell script-cell">
-              <a-select
-                v-model:value="record.script"
-                size="small"
-                style="width: 200px"
-                class="script-select"
-                :placeholder="t('queue.item.selectScript')"
-                :options="scriptOptions"
-                :disabled="locked"
-                allow-clear
-                @change="updateQueueItemScript(record)"
-              />
-            </div>
-            <div v-if="!showCycleConfig" class="row-cell days-cell">
-              <a-select
-                v-model:value="record.schedule.Days"
-                mode="multiple"
-                size="small"
-                style="width: 100%"
-                class="days-select"
-                :placeholder="t('queue.time.selectDays')"
-                :disabled="locked"
-                :max-tag-count="7"
-                :bordered="false"
-                @change="saveDays(record)"
-              >
-                <a-select-option value="Monday">{{ t('queue.time.Monday') }}</a-select-option>
-                <a-select-option value="Tuesday">{{ t('queue.time.Tuesday') }}</a-select-option>
-                <a-select-option value="Wednesday">{{ t('queue.time.Wednesday') }}</a-select-option>
-                <a-select-option value="Thursday">{{ t('queue.time.Thursday') }}</a-select-option>
-                <a-select-option value="Friday">{{ t('queue.time.Friday') }}</a-select-option>
-                <a-select-option value="Saturday">{{ t('queue.time.Saturday') }}</a-select-option>
-                <a-select-option value="Sunday">{{ t('queue.time.Sunday') }}</a-select-option>
-              </a-select>
+              <div class="script-stack">
+                <div v-for="item in row.items" :key="item.id" class="script-line">
+                  <a-select
+                    v-model:value="item.script"
+                    size="small"
+                    style="width: 200px"
+                    class="script-select"
+                    :placeholder="t('queue.item.selectScript')"
+                    :options="scriptOptions"
+                    :disabled="locked"
+                    allow-clear
+                    @change="updateQueueItemScript(item)"
+                  />
+                  <a-popconfirm
+                    v-if="row.items.length > 1"
+                    :title="t('queue.item.deleteConfirm')"
+                    :ok-text="t('queue.ok')"
+                    :cancel-text="t('queue.cancel')"
+                    @confirm="removeScript(row, item)"
+                  >
+                    <a-button type="text" size="small" danger :disabled="locked">
+                      <MinusCircleOutlined />
+                    </a-button>
+                  </a-popconfirm>
+                </div>
+              </div>
             </div>
             <div v-if="showCycleConfig" class="row-cell cycle-cell">
               <div class="cycle-panel">
                 <div class="cycle-line">
                   <a-switch
-                    v-model:checked="record.schedule.Enabled"
+                    v-model:checked="row.items[0].schedule.Enabled"
                     size="small"
-                    @change="saveSchedule(record, { Enabled: record.schedule.Enabled })"
+                    @change="
+                      saveSchedule(row.items[0], {
+                        Enabled: row.items[0].schedule.Enabled,
+                      })
+                    "
                   />
                   <a-select
-                    v-model:value="record.schedule.Mode"
+                    v-model:value="row.items[0].schedule.Mode"
                     size="small"
                     style="width: 104px"
-                    :disabled="!record.schedule.Enabled"
-                    @change="saveSchedule(record, { Mode: record.schedule.Mode })"
+                    :disabled="!row.items[0].schedule.Enabled"
+                    @change="
+                      saveSchedule(row.items[0], { Mode: row.items[0].schedule.Mode })
+                    "
                   >
                     <a-select-option value="fixed_time">
                       {{ t('queue.cycle.modeFixed') }}
@@ -111,25 +107,27 @@
                     </a-select-option>
                   </a-select>
 
-                  <template v-if="record.schedule.Mode === 'interval'">
+                  <template v-if="row.items[0].schedule.Mode === 'interval'">
                     <a-input-number
-                      v-model:value="record.schedule.IntervalMinutes"
+                      v-model:value="row.items[0].schedule.IntervalMinutes"
                       size="small"
                       style="width: 104px"
                       :min="1"
                       :max="10080"
-                      :disabled="!record.schedule.Enabled"
+                      :disabled="!row.items[0].schedule.Enabled"
                       :addon-after="t('queue.cycle.minuteUnit')"
-                      @blur="saveInterval(record)"
-                      @press-enter="saveInterval(record)"
+                      @blur="saveInterval(row.items[0])"
+                      @press-enter="saveInterval(row.items[0])"
                     />
                     <a-select
-                      v-model:value="record.schedule.IntervalAnchor"
+                      v-model:value="row.items[0].schedule.IntervalAnchor"
                       size="small"
                       style="width: 150px"
-                      :disabled="!record.schedule.Enabled"
+                      :disabled="!row.items[0].schedule.Enabled"
                       @change="
-                        saveSchedule(record, { IntervalAnchor: record.schedule.IntervalAnchor })
+                        saveSchedule(row.items[0], {
+                          IntervalAnchor: row.items[0].schedule.IntervalAnchor,
+                        })
                       "
                     >
                       <a-select-option value="start">
@@ -142,24 +140,26 @@
                   </template>
                   <template v-else>
                     <a-time-picker
-                      v-model:value="record.scheduleTimeValue"
+                      v-model:value="row.items[0].scheduleTimeValue"
                       format="HH:mm"
                       size="small"
                       style="width: 104px"
                       :placeholder="t('queue.time.selectTime')"
-                      :disabled="!record.schedule.Enabled"
+                      :disabled="!row.items[0].schedule.Enabled"
                       :allow-clear="false"
-                      @change="saveScheduleTime(record)"
+                      @change="saveScheduleTime(row.items[0])"
                     />
                     <a-select
-                      v-model:value="record.schedule.Days"
+                      v-model:value="row.items[0].schedule.Days"
                       mode="multiple"
                       size="small"
                       style="min-width: 168px"
                       :placeholder="t('queue.time.selectDays')"
-                      :disabled="!record.schedule.Enabled"
+                      :disabled="!row.items[0].schedule.Enabled"
                       :max-tag-count="3"
-                      @change="saveDays(record)"
+                      @change="
+                        saveSchedule(row.items[0], { Days: row.items[0].schedule.Days })
+                      "
                     >
                       <a-select-option value="Monday">{{ t('queue.time.Monday') }}</a-select-option>
                       <a-select-option value="Tuesday">
@@ -183,13 +183,13 @@
                 <div class="cycle-line cycle-next-line">
                   <span class="cycle-next-text">
                     {{ t('queue.cycle.nextRun') }}
-                    {{ formatNextRun(record.schedule.NextRunAt) }}
+                    {{ formatNextRun(row.items[0].schedule.NextRunAt) }}
                   </span>
                   <a-button
                     type="link"
                     size="small"
-                    :disabled="!record.schedule.Enabled"
-                    @click="runOnce(record)"
+                    :disabled="!row.items[0].schedule.Enabled"
+                    @click="runOnce(row.items[0])"
                   >
                     {{ t('queue.cycle.runOnce') }}
                   </a-button>
@@ -198,11 +198,30 @@
             </div>
             <div class="row-cell actions-cell">
               <a-space>
+                <a-tooltip :title="t('queue.item.addScriptTip')">
+                  <a-button :disabled="locked || loading" @click="appendScript(row)">
+                    <PlusOutlined />
+                    {{ t('queue.item.addScript') }}
+                  </a-button>
+                </a-tooltip>
                 <a-popconfirm
+                  v-if="row.items.length > 1"
+                  :title="t('queue.item.deleteRowConfirm')"
+                  :ok-text="t('queue.ok')"
+                  :cancel-text="t('queue.cancel')"
+                  @confirm="deleteRow(row)"
+                >
+                  <a-button size="middle" danger :disabled="locked">
+                    <DeleteOutlined />
+                    {{ t('queue.del') }}
+                  </a-button>
+                </a-popconfirm>
+                <a-popconfirm
+                  v-else
                   :title="t('queue.item.deleteConfirm')"
                   :ok-text="t('queue.ok')"
                   :cancel-text="t('queue.cancel')"
-                  @confirm="deleteQueueItem(record.id)"
+                  @confirm="removeScript(row, row.items[0])"
                 >
                   <a-button size="middle" danger :disabled="locked">
                     <DeleteOutlined />
@@ -216,7 +235,7 @@
       </draggable>
 
       <!-- 空状态 -->
-      <div v-if="queueItems.length === 0" class="empty-state">
+      <div v-if="rows.length === 0" class="empty-state">
         <div class="empty-content">
           <img src="@/assets/NoData.png" :alt="t('queue.noData')" class="empty-image" />
         </div>
@@ -229,10 +248,15 @@
 import { useI18n } from 'vue-i18n'
 import { onMounted, ref, nextTick, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { DeleteOutlined, PlusOutlined } from '@ant-design/icons-vue'
+import {
+  DeleteOutlined,
+  MinusCircleOutlined,
+  PlusOutlined,
+} from '@ant-design/icons-vue'
 import draggable from 'vuedraggable'
 import dayjs from 'dayjs'
 import { Service } from '@/api'
+import { splitParallelGroups } from '@/utils/parallelGroups'
 
 const { t } = useI18n()
 const logger = window.electronAPI.getLogger('队列项管理')
@@ -292,14 +316,24 @@ const withCycleSchedule = (items: any[]) =>
   })
 
 // 计算属性 - 使用props传入的数据
-const queueItems = ref(withCycleSchedule(props.queueItems))
+// 一行 = 一个并行批次（splitParallelGroups 把相邻 Parallel=true 的项合并），
+// 单脚本行就是当前所有 QueueItem 的退化情形
+interface QueueRow {
+  key: string
+  items: any[]
+}
+
+const buildRows = (items: any[]): QueueRow[] =>
+  splitParallelGroups(items).map(g => ({ key: g.items[0].id, items: g.items }))
+
+const rows = ref<QueueRow[]>(buildRows(withCycleSchedule(props.queueItems)))
 
 // 监听props变化
 watch(
   () => props.queueItems,
   newQueueItems => {
     if (!isDraggingQueueItem.value) {
-      queueItems.value = withCycleSchedule(newQueueItems)
+      rows.value = buildRows(withCycleSchedule(newQueueItems))
     }
   },
   { deep: true }
@@ -520,8 +554,8 @@ const onDragEnd = async (evt: any) => {
   try {
     loading.value = true
 
-    // 构造排序后的ID列表
-    const sortedIds = queueItems.value.map(item => item.id)
+    // 构造排序后的ID列表（按行的展开顺序，保持后端 script_list 下标不变）
+    const sortedIds = rows.value.flatMap(r => r.items.map(i => i.id))
 
     // 调用排序API
     const response = await Service.reorderItemApiQueueItemOrderPost({
@@ -550,6 +584,178 @@ const onDragEnd = async (evt: any) => {
     nextTick(() => {
       isDraggingQueueItem.value = false
     })
+  }
+}
+
+// 在指定行末尾追加一个脚本（与本行其他脚本并行）
+const appendScript = async (row: QueueRow) => {
+  if (props.locked) return
+  // 创建成功后的任何一步失败都要把空项删掉，不让队列残留未配置的项
+  let newId: string | null = null
+  const rollbackNewItem = async () => {
+    if (!newId) return
+    try {
+      await Service.deleteItemApiQueueItemDeletePost({
+        queueId: props.queueId,
+        queueItemId: newId,
+      })
+    } catch (error: any) {
+      const msg = error instanceof Error ? error.message : String(error)
+      logger.warn(`回滚新建队列项失败: ${msg}`)
+    }
+  }
+  try {
+    loading.value = true
+    // 1. 新建一个空脚本项
+    const createResponse = await Service.addItemApiQueueItemAddPost({
+      queueId: props.queueId,
+    })
+    if (createResponse.code !== 200 || !createResponse.queueItemId) {
+      message.error(
+        t('queue.toast.addTaskFailed', {
+          error: createResponse.message || t('queue.toast.unknownError'),
+        })
+      )
+      return
+    }
+    newId = createResponse.queueItemId
+
+    // 2. parallel=true 表示「并入前一项所在组」，标志必须写在新项上；
+    //    行首保持 false，行边界才不会变
+    const flagResponse = await Service.updateItemApiQueueItemUpdatePost({
+      queueId: props.queueId,
+      queueItemId: newId,
+      data: { Info: { Parallel: true } },
+    })
+    if (flagResponse.code !== 200) {
+      message.error(
+        t('queue.toast.updateScriptFailed', {
+          error: flagResponse.message || t('queue.toast.unknownError'),
+        })
+      )
+      await rollbackNewItem()
+      return
+    }
+
+    // 3. 把新 id 插到本行末项之后：其余项位置不变，行边界与批次顺序都不动
+    const currentOrder = rows.value.flatMap(r => r.items.map(i => i.id))
+    const insertAt = currentOrder.indexOf(row.items[row.items.length - 1].id) + 1
+    const order = [
+      ...currentOrder.slice(0, insertAt),
+      newId,
+      ...currentOrder.slice(insertAt),
+    ]
+    const reorderResponse = await Service.reorderItemApiQueueItemOrderPost({
+      queueId: props.queueId,
+      indexList: order,
+    })
+    if (reorderResponse.code !== 200) {
+      message.error(
+        t('queue.toast.reorderFailed', {
+          error: reorderResponse.message || t('queue.toast.unknownError'),
+        })
+      )
+      await rollbackNewItem()
+      return
+    }
+    emit('refresh')
+  } catch (error: any) {
+    const errorMsg = error instanceof Error ? error.message : String(error)
+    logger.error(`追加脚本失败: ${errorMsg}`)
+    message.error(t('queue.toast.addTaskFailed2', { error: errorMsg }))
+    await rollbackNewItem()
+  } finally {
+    loading.value = false
+  }
+}
+
+// 删除行内某个脚本
+const removeScript = async (row: QueueRow, item: any) => {
+  if (props.locked) return
+  // 删组首前先把新组首 Parallel 置 false，否则删完它会被并进上一行；
+  // 后续删除失败时要把标志回滚成 true，避免留下 refresh 也校正不了的行边界
+  const isHeadOfMultiRow = item.id === row.items[0].id && row.items.length > 1
+  const newLeader = isHeadOfMultiRow ? row.items[1] : null
+  const restoreLeader = async () => {
+    if (!newLeader) return
+    try {
+      await Service.updateItemApiQueueItemUpdatePost({
+        queueId: props.queueId,
+        queueItemId: newLeader.id,
+        data: { Info: { Parallel: true } },
+      })
+    } catch (error: any) {
+      const msg = error instanceof Error ? error.message : String(error)
+      logger.warn(`新组首 Parallel 回滚失败: ${msg}`)
+    }
+  }
+  if (newLeader) {
+    try {
+      const r = await Service.updateItemApiQueueItemUpdatePost({
+        queueId: props.queueId,
+        queueItemId: newLeader.id,
+        data: { Info: { Parallel: false } },
+      })
+      if (r.code !== 200) {
+        message.error(
+          t('queue.toast.updateScriptFailed', {
+            error: r.message || t('queue.toast.unknownError'),
+          })
+        )
+        return
+      }
+    } catch (error: any) {
+      const errorMsg = error instanceof Error ? error.message : String(error)
+      logger.error(`更新新组首并行标志失败: ${errorMsg}`)
+      message.error(t('queue.toast.updateScriptFailed', { error: errorMsg }))
+      return
+    }
+  }
+  try {
+    const response = await Service.deleteItemApiQueueItemDeletePost({
+      queueId: props.queueId,
+      queueItemId: item.id,
+    })
+    if (response.code === 200) {
+      emit('refresh')
+    } else {
+      await restoreLeader()
+      message.error(
+        t('queue.toast.deleteItemFailed', {
+          error: response.message || t('queue.toast.unknownError'),
+        })
+      )
+    }
+  } catch (error: any) {
+    await restoreLeader()
+    const errorMsg = error instanceof Error ? error.message : String(error)
+    logger.error(`删除脚本失败: ${errorMsg}`)
+    message.error(t('queue.toast.deleteItemFailed', { error: errorMsg }))
+  }
+}
+
+// 删除整行（并行组）
+const deleteRow = async (row: QueueRow) => {
+  if (props.locked) return
+  try {
+    for (const item of row.items) {
+      const response = await Service.deleteItemApiQueueItemDeletePost({
+        queueId: props.queueId,
+        queueItemId: item.id,
+      })
+      if (response.code !== 200) {
+        message.error(
+          t('queue.toast.deleteItemFailed', {
+            error: response.message || t('queue.toast.unknownError'),
+          })
+        )
+      }
+    }
+    emit('refresh')
+  } catch (error: any) {
+    const errorMsg = error instanceof Error ? error.message : String(error)
+    logger.error(`删除批次失败: ${errorMsg}`)
+    message.error(t('queue.toast.deleteItemFailed', { error: errorMsg }))
   }
 }
 
@@ -678,14 +884,15 @@ onMounted(() => {
 }
 
 .script-cell {
-  flex: 1;
+  flex: 1.5 1 320px;
   min-width: 200px;
 }
 
 .actions-cell {
-  width: 120px;
-  min-width: 120px;
-  max-width: 120px;
+  /* 容纳「添加 + 删除」两个 middle 按钮，避免溢出表格 */
+  width: 224px;
+  min-width: 224px;
+  max-width: 224px;
 }
 
 .draggable-container {
@@ -694,7 +901,8 @@ onMounted(() => {
 
 .draggable-row {
   display: flex;
-  align-items: center;
+  /* 单元格拉伸到整行高，竖线边框才能与行的上下横线连通 */
+  align-items: stretch;
   background: var(--ant-color-bg-container);
   border-bottom: 1px solid var(--ant-color-border);
   transition: all 0.2s ease;
@@ -742,13 +950,7 @@ onMounted(() => {
 
 .header-cell.cycle-cell,
 .row-cell.cycle-cell {
-  flex: 1 1 520px;
-  min-width: 0;
-}
-
-.header-cell.days-cell,
-.row-cell.days-cell {
-  flex: 1 1 360px;
+  flex: 1 1 400px;
   min-width: 0;
 }
 
@@ -776,14 +978,31 @@ onMounted(() => {
 }
 
 .row-cell.script-cell {
-  flex: 1;
+  flex: 1.5 1 320px;
   min-width: 200px;
 }
 
 .row-cell.actions-cell {
-  width: 120px;
-  min-width: 120px;
-  max-width: 120px;
+  width: 224px;
+  min-width: 224px;
+  max-width: 224px;
+}
+
+/* 脚本列多脚本平铺：同一行的脚本横向排列，超出列宽才换行；保持列内居中 */
+.script-stack {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.script-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 /* 拖拽状态样式 */

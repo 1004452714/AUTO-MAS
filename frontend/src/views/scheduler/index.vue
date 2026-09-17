@@ -111,6 +111,9 @@
                 <SchedulerLogPanel
                   :log-content="tab.lastLogContent"
                   :external-log-mode="tab.logMode"
+                  :script-options="getLogScriptOptions(tab)"
+                  :script-selection="tab.logScriptSelection || 'auto'"
+                  @select-script="(value: string) => selectLogScript(tab, value)"
                 />
               </div>
             </div>
@@ -179,6 +182,8 @@ const {
   loadResumeScriptOptions,
   loadUserOptions,
 
+  // 日志操作
+  selectLogScript,
   // keep-alive 激活/停用
   setSchedulerViewActive,
 
@@ -196,6 +201,20 @@ const {
 
 const aprilFoolsMaskVisible = ref(false)
 const APRIL_FOOLS_STORAGE_PREFIX = 'scheduler-april-fools-triggered-'
+
+// 并行运行时按 scriptLogs 提供日志脚本切换选项；只有多于一个脚本才显示选择器。
+// 「跟随」永远排第一，与后端主日志（跟随运行中脚本）口径一致。
+const LOG_SCRIPT_AUTO = 'auto'
+const getLogScriptOptions = (tab: SchedulerTab) => {
+  const scriptLogs = tab.scriptLogs ?? {}
+  const runningScripts = (tab.overviewData ?? []).filter(script => script.status === '运行')
+  const entries = runningScripts.filter(script => scriptLogs[script.script_id] !== undefined)
+  if (entries.length <= 1) return []
+  return [
+    { label: t('scheduler.log.followScript'), value: LOG_SCRIPT_AUTO },
+    ...entries.map(script => ({ label: script.name, value: script.script_id })),
+  ]
+}
 
 const getUtc8DateParts = () => {
   const now = new Date()

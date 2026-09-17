@@ -24,7 +24,7 @@ import asyncio
 import os
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, Literal
@@ -253,6 +253,66 @@ def _get_src_root_path(script_config: object) -> Path | None:
     return Path(script_config.get("Info", "Path"))
 
 
+@dataclass
+class _ParallelGroupItem:
+    """并行组内单个队列项的执行描述，与全局配置解耦便于单测。"""
+
+    parallel: bool
+    # 资源互斥键（脚本ID/模拟器实例/安装路径）：组内共享同一键的项排队依次运行
+    conflict_keys: set[str] = field(default_factory=set)
+
+
+def _split_parallel_groups(
+    items: dict[int, _ParallelGroupItem],
+) -> list[list[int]]:
+    """把队列项按绝对下标划分成顺序执行的组。
+
+    ``parallel`` 开启的项归入前一项所在组，组内允许重叠执行；组与组之间
+    保持顺序。同组内共用脚本、模拟器实例或安装路径（``conflict_keys``
+    相交）的项不拆组，由组内资源锁保证它们按队列顺序排队依次运行——
+    见 ``Task._run_script_group``。
+
+    Args:
+        items (dict[int, _ParallelGroupItem]): 绝对下标 → 队列项执行描述，
+            按下标升序遍历。
+
+    Returns:
+        list[list[int]]: 每组的队列项绝对下标列表。
+    """
+
+    groups: list[list[int]] = []
+    for position, index in enumerate(sorted(items)):
+        # 组首总是新开一组；parallel 只表示「并入前一项的组」
+        if position > 0 and items[index].parallel:
+            groups[-1].append(index)
+        else:
+            groups.append([index])
+    return groups
+
+
+def _resolve_main_log_index(task_info: TaskItem) -> int:
+    """主日志跟随的脚本下标。
+
+    current_index 指向的脚本仍在运行时沿用之（顺序执行与原行为一致）；
+    并行组内它先结束时切到第一个仍在运行的脚本，「跟随」视图才不会停在
+    一个已结束的项上；全部结束后回退 current_index，保留收尾日志展示。
+    """
+
+    index = task_info.current_index
+    if 0 <= index < len(task_info.script_list) and (
+        task_info.script_list[index].status == "运行"
+    ):
+        return index
+    return next(
+        (
+            i
+            for i, script_item in enumerate(task_info.script_list)
+            if script_item.status == "运行"
+        ),
+        index,
+    )
+
+
 class TaskInfo(TaskItem):
     async def on_change(self):
         await Publisher.send(
@@ -265,29 +325,45 @@ class TaskInfo(TaskItem):
                 ],
             ),
         )
-        if self.current_index != -1:
-            log = self.script_list[self.current_index].log
-            if log == self._last_pushed_log:
-                return
-            # 日志只在尾部追加时只推增量；首次推送或日志被重置/变短时整体替换。
-            # 部分任务模式（MAA/SRC/General/M9A）无上限累积脚本日志，全量 JSON
-            # 序列化超大字符串会在 iterencode 阶段 MemoryError；整体替换时做
-            # 防御性限长（保留最新日志），一处覆盖所有任务模式。
-            if self._last_pushed_log and log.startswith(self._last_pushed_log):
-                payload = log[len(self._last_pushed_log) :]
-                append = True
-            else:
-                payload = log[-200_000:]
-                append = False
-            self._log_seq += 1
-            await Publisher.send(
-                id=self.task_id,
-                type=protocol.TASK_LOG_UPDATED,
-                data=WSTaskLogUpdatedData(
-                    log=payload, seq=self._log_seq, append=append
-                ),
-            )
-            self._last_pushed_log = log
+
+        # 并行运行时每个运行中的脚本各带一份日志，前端日志面板按脚本切换
+        # 展示；只带运行中的脚本，避免整包越滚越大。单个运行中脚本时省略
+        # ——主 log 已是同一份内容，顺序模式不为它翻倍推送体积。
+        script_logs = {
+            script_item.script_id: script_item.log[-200_000:]
+            for script_item in self.script_list
+            if script_item.status == "运行" and script_item.log
+        }
+        log_index = _resolve_main_log_index(self)
+        if log_index == -1:
+            return
+        log = self.script_list[log_index].log
+        # 日志只在尾部追加时只推增量；首次推送或日志被重置/变短时整体替换。
+        # 并行组内其他脚本的日志快照可能独立更新，快照多于一份时不去重，
+        # 保证前端钉选视图能跟着刷新。
+        if log == self._last_pushed_log and len(script_logs) <= 1:
+            return
+        # 部分任务模式（MAA/SRC/General/M9A）无上限累积脚本日志，全量 JSON
+        # 序列化超大字符串会在 iterencode 阶段 MemoryError；整体替换时做
+        # 防御性限长（保留最新日志），一处覆盖所有任务模式。
+        if self._last_pushed_log and log.startswith(self._last_pushed_log):
+            payload = log[len(self._last_pushed_log) :]
+            append = True
+        else:
+            payload = log[-200_000:]
+            append = False
+        self._log_seq += 1
+        await Publisher.send(
+            id=self.task_id,
+            type=protocol.TASK_LOG_UPDATED,
+            data=WSTaskLogUpdatedData(
+                log=payload,
+                seq=self._log_seq,
+                append=append,
+                scriptLogs=script_logs if len(script_logs) > 1 else None,
+            ),
+        )
+        self._last_pushed_log = log
 
 
 class Task(TaskExecuteBase):
@@ -297,6 +373,7 @@ class Task(TaskExecuteBase):
         script_identities: list[WSTaskScriptIdentityData],
         script_reservations: _ScriptTaskReservations | None = None,
         script_run_days: list[list[str]] | None = None,
+        script_parallel_flags: list[bool] | None = None,
     ):
         super().__init__()
         self.task_info = task_info
@@ -306,6 +383,9 @@ class Task(TaskExecuteBase):
         self.script_run_days = script_run_days
         self.run_weekday = datetime.now().strftime("%A")
         self.script_reservations = script_reservations or _ScriptTaskReservations()
+        # 建任务时冻结的队列项并行开关，与 script_list 下标一一对应；
+        # 运行中编辑队列不会影响本次执行（与 script_identities 同一套冻结原则）
+        self.script_parallel_flags = script_parallel_flags or []
         self.is_closing = False
         self._exit_result = "success"
         self._exit_error: str | None = None
@@ -337,8 +417,15 @@ class Task(TaskExecuteBase):
                 user_list=[
                     UserItem(user_id=str(uuid.uuid4()), name="暂未加载", status="等待")
                 ],
+                # 并行开关与 script_identities 同序同源冻结（见 create_task 的
+                # script_parallel_flags），循环队列与非队列任务为空表时保持 False
+                parallel=(
+                    self.script_parallel_flags[index]
+                    if index < len(self.script_parallel_flags)
+                    else False
+                ),
             )
-            for script_id in script_ids
+            for index, script_id in enumerate(script_ids)
         ]
 
         logger.success(
@@ -483,6 +570,9 @@ class Task(TaskExecuteBase):
         每跑一个都重新推算：前一个条目刚改写了自己的下次运行时间，后面的预览和
         判断都得基于新状态，不能沿用本轮开头那份快照。被占用或没跑成的条目留到
         下一轮；一轮里一个都没跑成就先退避，不让循环空转。
+
+        并行组（``entry.sibling_queue_item_ids`` 非空）走 ``_run_cycle_entry_group``
+        复用 Task 的并行调度；行内其他成员本身不会出现在 ``pending`` 里。
         """
 
         results: list[str] = []
@@ -493,7 +583,12 @@ class Task(TaskExecuteBase):
             )
             if entry is None or not entry.is_due:
                 continue
-            results.append(await self._run_cycle_entry(queue_uid, entry, entries))
+            if entry.sibling_queue_item_ids:
+                results.append(
+                    await self._run_cycle_entry_group(queue_uid, entry, entries)
+                )
+            else:
+                results.append(await self._run_cycle_entry(queue_uid, entry, entries))
 
         if results and not any(result == "success" for result in results):
             await asyncio.sleep(CYCLE_RETRY_SLEEP_SECONDS)
@@ -614,6 +709,104 @@ class Task(TaskExecuteBase):
             logger.warning(f"循环任务未成功: {entry.script_name}")
         return "success" if success else "failed"
 
+    async def _run_cycle_entry_group(
+        self,
+        queue_uid: uuid.UUID,
+        entry: CycleEntry,
+        entries: list[CycleEntry],
+    ) -> Literal["success", "failed", "blocked"]:
+        """跑一个并行组（一行多脚本）。
+
+        行首 entry 由 ``_run_due_entries`` 单独传入；行内其它成员通过
+        ``entry.sibling_queue_item_ids`` 收集。复用 ``_build_parallel_group_items``
+        + ``_split_parallel_groups`` + ``_run_script_group`` 把整组扔进 Task
+        已有的并行调度（包含预约、资源互斥锁、取消传播）。
+
+        Schedule 仍按"行"挂，写在行首 QueueItem 上（LastCycleStartedAt /
+        LastCycleFinishedAt / NextRunAt），行内其他成员不写自己的 Schedule。
+        """
+
+        try:
+            queue_item = Config.QueueConfig[queue_uid].QueueItem[
+                uuid.UUID(entry.queue_item_id)
+            ]
+        except KeyError:
+            raise RuntimeError(
+                "循环队列的结构在运行中被改动，已停止循环，请重新启动"
+            ) from None
+
+        # 行内下标集合（绝对下标，邻接）
+        indices = [
+            entry.index + i for i in range(len(entry.sibling_queue_item_ids) + 1)
+        ]
+        script_list = self.task_info.script_list
+        for index in indices:
+            if index >= len(script_list):
+                raise RuntimeError(
+                    "循环队列的结构在运行中被改动，已停止循环，请重新启动"
+                )
+        if script_list[entry.index].script_id != entry.script_id:
+            raise RuntimeError("循环队列的结构在运行中被改动，已停止循环，请重新启动")
+
+        # 行级 Schedule 在 gather 之前写一次
+        started_at = datetime.now()
+        await queue_item.set(
+            "Data", "LastCycleStartedAt", format_cycle_time(started_at)
+        )
+        if queue_item.get("Schedule", "IntervalAnchor") == "start":
+            await queue_item.set(
+                "Schedule",
+                "NextRunAt",
+                format_next_run(next_after_start(queue_item, started_at)),
+            )
+
+        # 构造并行组描述：parallel_flags 是 create_task 时按绝对下标冻结的
+        # 开关（行首 False、sibling True），与 _build_parallel_group_items 的
+        # 取用口径一致；再把结果过滤到本行下标，sibling 邻接时切分出的
+        # groups[0] 恰好就是整行
+        group_items = self._build_parallel_group_items(
+            entry.index, self.script_parallel_flags
+        )
+        row_items = {index: group_items[index] for index in indices}
+        groups = _split_parallel_groups(row_items)
+        group = groups[0]
+        if group != indices:
+            raise RuntimeError("循环队列的结构在运行中被改动，已停止循环，请重新启动")
+
+        success = False
+        try:
+            await self._run_script_group(group, group_items)
+            # 全部脚本状态为"完成"才算本行成功；任一异常 / 未完成都失败
+            success = all(script_list[i].status == "完成" for i in group)
+            # 至少让 entry（行首）有正确的状态文本，匹配 _run_cycle_entry 的语义
+            self.task_info.current_index = entry.index
+            logger.info(
+                f"循环并行组完成: 行首={entry.queue_item_id}, 脚本数={len(group)}"
+            )
+        except Exception as e:
+            logger.exception(f"循环并行组出现异常: {e}")
+        finally:
+            # 行级 Schedule 写一次：NextRunAt / LastCycleFinishedAt
+            finished_at = datetime.now()
+            await queue_item.set(
+                "Data",
+                "LastCycleFinishedAt",
+                format_cycle_time(finished_at),
+            )
+            if queue_item.get("Schedule", "IntervalAnchor") == "start":
+                next_run_at = next_after_start(
+                    queue_item, started_at, after=finished_at
+                )
+            else:
+                next_run_at = next_after_finish(queue_item, finished_at)
+            await queue_item.set("Schedule", "NextRunAt", format_next_run(next_run_at))
+            # 刷新预览让前端能看到这一轮已结束
+            await self._publish_cycle_preview(entries)
+
+        if not success:
+            logger.warning(f"循环并行组未全部成功: 行首={entry.queue_item_id}")
+        return "success" if success else "failed"
+
     async def _spawn_with_preview(
         self,
         task_item: TaskExecuteBase,
@@ -721,7 +914,138 @@ class Task(TaskExecuteBase):
         # 依次运行任务。桌面保障是常驻守卫，这里只强制它立刻巡检一次：轮询有几秒窗口，
         # 而任务一旦在幻影屏上起来，游戏就会把坏掉的窗口尺寸记进自己的配置。
         await ensure_desktop_available()
-        await self._run_script_list(start_index)
+
+        # 并行组划分：连续开启 Parallel 的队列项归入同组，组内允许重叠执行，
+        # 组间顺序执行。组划分只看建任务时冻结的并行开关，与运行时预约无关
+        # ——预约失败（脚本被其他任务占用）仍走原「跳过」分支。
+        group_items = self._build_parallel_group_items(
+            start_index, self.script_parallel_flags
+        )
+        groups = _split_parallel_groups(group_items)
+
+        for group in groups:
+            if len(group) == 1:
+                # 顺序执行：单项组直接等待，与原有逐项执行行为一致
+                await self._run_script_at_index(group[0])
+                continue
+            logger.info(f"并行执行任务组: {len(group)} 个脚本")
+            await self._run_script_group(group, group_items)
+
+    async def _run_script_group(
+        self, group: list[int], items_by_index: dict[int, _ParallelGroupItem]
+    ) -> None:
+        """并发执行一个并行组，组内资源冲突的项按队列顺序排队。
+
+        组内为每个资源键（脚本ID/模拟器实例/安装路径）建一把锁：共享同一
+        键的项依次持锁运行，谁先排到谁先跑；不同键的项照常并发。这正是
+        「两条资源链各自串行、链间并行」的调度核心。
+
+        ``group`` 与 ``items_by_index`` 的键都是 script_list 的绝对下标，
+        与 resume_from_script_id 的截断无关。
+
+        锁按排序后的键序获取，杜绝组内循环等待；收尾逆序释放已获取的锁，
+        取消（用户停止）与异常路径同样安全。
+        """
+
+        locks: dict[str, asyncio.Lock] = {}
+        keys_by_index: dict[int, set[str]] = {}
+        for index in group:
+            keys = items_by_index[index].conflict_keys
+            keys_by_index[index] = keys
+            for key in keys:
+                locks.setdefault(key, asyncio.Lock())
+
+        async def run_with_locks(index: int) -> None:
+            acquired: list[asyncio.Lock] = []
+            try:
+                for key in sorted(keys_by_index[index]):
+                    lock = locks[key]
+                    await lock.acquire()
+                    acquired.append(lock)
+                await self._run_script_at_index(index)
+            finally:
+                for lock in reversed(acquired):
+                    lock.release()
+
+        results = await asyncio.gather(
+            *[run_with_locks(index) for index in group],
+            return_exceptions=True,
+        )
+        # 先重抛取消（用户停止要尽快结束整个队列任务），再重抛首个真实异常，
+        # 与顺序执行里「前一项异常会带崩整个任务」的语义保持一致
+        for result in results:
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
+    def _build_parallel_group_items(
+        self, start_index: int, parallel_flags: list[bool]
+    ) -> dict[int, _ParallelGroupItem]:
+        """按 script_list 构造组执行描述，键为 script_list 的绝对下标。
+
+        ``parallel_flags`` 是建任务时按队列顺序冻结的并行开关，与脚本列表
+        下标一一对应；队列在运行中被编辑不会改变本次执行的分组。返回绝对
+        下标做键，组划分与执行不会被 resume_from_script_id 的截断错位。
+        """
+
+        items: dict[int, _ParallelGroupItem] = {}
+        for index in range(start_index, len(self.task_info.script_list)):
+            script_item = self.task_info.script_list[index]
+            parallel = index < len(parallel_flags) and parallel_flags[index]
+
+            script_uid = uuid.UUID(script_item.script_id)
+            conflict_keys: set[str] = set()
+            if script_uid in Config.ScriptConfig:
+                conflict_keys = self._script_conflict_keys(
+                    script_uid, Config.ScriptConfig[script_uid]
+                )
+
+            items[index] = _ParallelGroupItem(
+                parallel=parallel, conflict_keys=conflict_keys
+            )
+        return items
+
+    @staticmethod
+    def _script_conflict_keys(script_uid: uuid.UUID, script_config) -> set[str]:
+        """提取脚本的组内资源互斥键：脚本ID、模拟器实例、安装路径。
+
+        并非所有脚本类型都配置模拟器（MAA/SRC/M9A/MaaFW 在 Emulator 组，
+        MaaEnd/General 在 Game 组，HSR/ok-script/BetterGI 不用模拟器），缺哪
+        个跳过哪个；未配置（值为 \"-\"）同样视作无该键。并行组内共享同一键
+        的项由组内资源锁排队依次运行——同一模拟器实例被两个任务先后使用
+        没问题，同时使用会被先结束的一方关掉。
+        """
+
+        keys = {f"script:{script_uid}"}
+
+        for group, id_key, index_key in (
+            ("Emulator", "Id", "Index"),
+            ("Game", "EmulatorId", "EmulatorIndex"),
+        ):
+            try:
+                emulator_id = str(script_config.get(group, id_key) or "").strip()
+                emulator_index = str(script_config.get(group, index_key) or "").strip()
+            except AttributeError:
+                continue
+            if (
+                emulator_id
+                and emulator_id != "-"
+                and emulator_index
+                and emulator_index != "-"
+            ):
+                keys.add(f"emulator:{emulator_id}/{emulator_index}")
+                break
+
+        try:
+            script_path = str(script_config.get("Info", "Path") or "").strip()
+        except AttributeError:
+            script_path = ""
+        if script_path:
+            keys.add(f"path:{os.path.normcase(os.path.normpath(script_path))}")
+
+        return keys
 
     def _is_script_scheduled_today(self, index: int) -> bool:
         """队列项的运行周几不含创建任务当天时跳过；非队列任务与缺省项一律运行。"""
@@ -730,100 +1054,96 @@ class Task(TaskExecuteBase):
             return True
         return self.run_weekday in self.script_run_days[index]
 
-    async def _run_script_list(self, start_index: int) -> None:
-        for self.task_info.current_index in range(
-            start_index, len(self.task_info.script_list)
+    async def _run_script_at_index(self, index: int) -> None:
+        """执行 script_list 中一个队列项脚本，预约/解锁语义与原顺序循环一致。"""
+
+        self.task_info.current_index = index
+        script_item = self.task_info.script_list[index]
+        current_script_uid = uuid.UUID(script_item.script_id)
+
+        # 检查任务对应脚本是否仍存在
+        if current_script_uid not in Config.ScriptConfig:
+            script_item.status = "异常"
+            self._record_error(f"脚本 {current_script_uid} 已被删除")
+            logger.info(f"跳过任务: {current_script_uid}, 该任务对应脚本已被删除")
+            await Publisher.send(
+                id=self.task_info.task_id,
+                type=protocol.TASK_NOTICE,
+                data=WSTaskNoticeData(
+                    level="error",
+                    message=f"任务 {script_item.name} 对应脚本已被删除",
+                ),
+            )
+            return
+
+        if not self._is_script_scheduled_today(index):
+            script_item.status = "跳过"
+            logger.info(
+                f"跳过任务: {current_script_uid}, 队列项未安排在 {self.run_weekday} 运行"
+            )
+            return
+
+        # 原子占用脚本，避免两个调度器同时通过布尔锁前置检查。
+        reservation_owner = self.task_info.task_id
+        script_config = Config.ScriptConfig[current_script_uid]
+        src_root_path = _get_src_root_path(script_config)
+        if not self.script_reservations.try_acquire(
+            current_script_uid,
+            reservation_owner,
+            src_root_path=src_root_path,
         ):
-            script_item = self.task_info.script_list[self.task_info.current_index]
-            current_script_uid = uuid.UUID(script_item.script_id)
+            script_item.status = "跳过"
+            logger.info(f"跳过任务: {current_script_uid}, 该任务已被其他任务调度器锁定")
+            await Publisher.send(
+                id=self.task_info.task_id,
+                type=protocol.TASK_NOTICE,
+                data=WSTaskNoticeData(
+                    level="warning",
+                    message=f"任务 {script_item.name} 已被其他任务调度器锁定",
+                ),
+            )
+            return
 
-            # 检查任务对应脚本是否仍存在
-            if current_script_uid not in Config.ScriptConfig:
-                script_item.status = "异常"
-                self._record_error(f"脚本 {current_script_uid} 已被删除")
-                logger.info(f"跳过任务: {current_script_uid}, 该任务对应脚本已被删除")
-                await Publisher.send(
-                    id=self.task_info.task_id,
-                    type=protocol.TASK_NOTICE,
-                    data=WSTaskNoticeData(
-                        level="error",
-                        message=f"任务 {script_item.name} 对应脚本已被删除",
-                    ),
-                )
-                continue
-
-            if not self._is_script_scheduled_today(self.task_info.current_index):
+        try:
+            if script_config.is_locked:
                 script_item.status = "跳过"
-                logger.info(
-                    f"跳过任务: {current_script_uid}, 队列项未安排在 {self.run_weekday} 运行"
-                )
-                continue
-
-            # 原子占用脚本，避免两个调度器同时通过布尔锁前置检查。
-            reservation_owner = self.task_info.task_id
-            script_config = Config.ScriptConfig[current_script_uid]
-            src_root_path = _get_src_root_path(script_config)
-            if not self.script_reservations.try_acquire(
-                current_script_uid,
-                reservation_owner,
-                src_root_path=src_root_path,
-            ):
-                script_item.status = "跳过"
-                logger.info(
-                    f"跳过任务: {current_script_uid}, 该任务已被其他任务调度器锁定"
-                )
+                logger.info(f"跳过任务: {current_script_uid}, 该任务配置已被锁定")
                 await Publisher.send(
                     id=self.task_info.task_id,
                     type=protocol.TASK_NOTICE,
                     data=WSTaskNoticeData(
                         level="warning",
-                        message=f"任务 {script_item.name} 已被其他任务调度器锁定",
+                        message=f"任务 {script_item.name} 已被锁定",
                     ),
                 )
-                continue
+                return
 
-            try:
-                if script_config.is_locked:
-                    script_item.status = "跳过"
-                    logger.info(f"跳过任务: {current_script_uid}, 该任务配置已被锁定")
-                    await Publisher.send(
-                        id=self.task_info.task_id,
-                        type=protocol.TASK_NOTICE,
-                        data=WSTaskNoticeData(
-                            level="warning",
-                            message=f"任务 {script_item.name} 已被锁定",
-                        ),
-                    )
-                    continue
+            # 标记为运行中
+            script_item.status = "运行"
+            logger.info(f"任务开始: {current_script_uid}")
 
-                # 标记为运行中
-                script_item.status = "运行"
-                logger.info(f"任务开始: {current_script_uid}")
-
-                task_item = self._build_task_item(
-                    script_item,
-                    script_config,
-                    script_uid=current_script_uid,
-                    reservation_owner=reservation_owner,
-                    src_root_path=src_root_path,
+            task_item = self._build_task_item(
+                script_item,
+                script_config,
+                script_uid=current_script_uid,
+                reservation_owner=reservation_owner,
+                src_root_path=src_root_path,
+            )
+            if task_item is None:
+                script_item.status = "异常"
+                self._record_error(f"不支持的脚本类型: {type(script_config).__name__}")
+                logger.error(f"不支持的脚本类型: {type(script_config).__name__}")
+                await Publisher.send(
+                    id=self.task_info.task_id,
+                    type=protocol.TASK_NOTICE,
+                    data=WSTaskNoticeData(level="error", message="脚本类型不支持"),
                 )
-                if task_item is None:
-                    script_item.status = "异常"
-                    self._record_error(
-                        f"不支持的脚本类型: {type(script_config).__name__}"
-                    )
-                    logger.error(f"不支持的脚本类型: {type(script_config).__name__}")
-                    await Publisher.send(
-                        id=self.task_info.task_id,
-                        type=protocol.TASK_NOTICE,
-                        data=WSTaskNoticeData(level="error", message="脚本类型不支持"),
-                    )
-                    continue
+                return
 
-                # 运行任务
-                await self.spawn(task_item)
-            finally:
-                self.script_reservations.release(current_script_uid, reservation_owner)
+            # 运行任务
+            await self.spawn(task_item)
+        finally:
+            self.script_reservations.release(current_script_uid, reservation_owner)
 
     async def final_task(self) -> None:
 
@@ -906,6 +1226,25 @@ class _TaskManager:
             and script_id != "-"
         ]
 
+    @staticmethod
+    def _queue_script_pairs(queue_id: uuid.UUID) -> list[tuple[uuid.UUID, bool]]:
+        """返回队列中实际引用脚本的 (脚本 ID, 并行开关) 对，按队列项顺序。
+
+        只跳过空脚本项（"-"）；脚本是否仍存在于 ScriptConfig 由调用方按
+        各自口径过滤，但两处必须使用同一过滤，保证并行开关与脚本身份
+        一直对齐。
+        """
+
+        pairs: list[tuple[uuid.UUID, bool]] = []
+        for queue_item in Config.QueueConfig[queue_id].QueueItem.values():
+            script_id = str(queue_item.get("Info", "ScriptId") or "").strip()
+            if not script_id or script_id == "-":
+                continue
+            pairs.append(
+                (uuid.UUID(script_id), bool(queue_item.get("Info", "Parallel")))
+            )
+        return pairs
+
     @classmethod
     def _queue_script_ids(cls, queue_id: uuid.UUID) -> list[uuid.UUID]:
         """返回队列中实际引用的脚本 ID。"""
@@ -950,6 +1289,12 @@ class _TaskManager:
 
         tasks: list[TaskRuntimeSnapshotItem] = []
         for task_uid, task_info in list(self.task_info.items()):
+            # 并行运行时附带各运行中脚本的日志；单个时省略，主 log 已覆盖
+            script_logs = {
+                script_item.script_id: script_item.log[-200_000:]
+                for script_item in task_info.script_list
+                if script_item.status == "运行" and script_item.log
+            }
             handler = self.task_handler.get(task_uid)
             tasks.append(
                 TaskRuntimeSnapshotItem(
@@ -969,6 +1314,7 @@ class _TaskManager:
                     # 返回上次推送的日志而非当前日志, 保证与下一条增量推送衔接
                     log=task_info._last_pushed_log[-200_000:],
                     logSeq=task_info._log_seq,
+                    scriptLogs=script_logs if len(script_logs) > 1 else None,
                 )
             )
         return TaskRuntimeSnapshot(
@@ -1135,9 +1481,26 @@ class _TaskManager:
             target_script_ids = [script_uid]
         else:
             target_script_ids = []
+
+        # 并行开关同源同序冻结，存在性过滤口径必须与 identities 一致，
+        # 否则下标错位会让并行开关落到错误的队列项上。
+        script_pairs = (
+            self._queue_script_pairs(queue_id) if queue_id is not None else []
+        )
         script_identities = [
             self._script_identity(script_id) for script_id in target_script_ids
         ]
+        # 队列任务（含循环队列）冻结每项的并行开关，让后台按并行组运行；
+        # 脚本任务（非队列）没有并行语义，留空。
+        script_parallel_flags = (
+            [
+                parallel
+                for script_id, parallel in script_pairs
+                if script_id in Config.ScriptConfig
+            ]
+            if queue_id is not None
+            else []
+        )
 
         reservation_owner = str(task_uid)
         reservation_acquired = False
@@ -1172,6 +1535,7 @@ class _TaskManager:
                 script_identities,
                 self._script_reservations,
                 script_run_days=script_run_days,
+                script_parallel_flags=script_parallel_flags,
             )
             await Publisher.send(
                 id=protocol.ID_TASK_MANAGER,

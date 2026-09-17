@@ -57,6 +57,10 @@ export type TaskRuntimeSnapshotItem = {
      * 已推送日志对应的推送序号
      */
     logSeq?: number;
+    /**
+     * 并行运行时各运行中脚本的日志, 键为脚本 ID; 单脚本运行时为空
+     */
+    scriptLogs?: Record<string, string>;
 };
 export namespace TaskRuntimeSnapshotItem {
     /**

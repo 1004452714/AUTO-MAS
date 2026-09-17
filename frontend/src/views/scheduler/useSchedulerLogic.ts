@@ -871,6 +871,7 @@ export function useSchedulerLogic() {
         script_id: s.script_id || `script_${index}`,
         name: s.name || t('scheduler.overview.unknownScript'),
         status: s.status || '等待',
+        parallel: s.parallel ?? false,
         user_list: (s.userList ?? []).map((user, userIndex) => ({
           user_id: user.user_id || `user_${index}_${userIndex}`,
           name: user.name,
@@ -895,6 +896,10 @@ export function useSchedulerLogic() {
 
   // 增量协议：append=false 整体替换；append=true 且 seq 连续则追加，否则重同步
   const handleTaskLogUpdated = (tab: SchedulerTab, data: WSTaskLogUpdatedData) => {
+    // 并行运行时后端各带一份脚本日志，钉选了具体脚本就展示那一份
+    tab.scriptLogs = data.scriptLogs ?? {}
+    const selection = tab.logScriptSelection ?? 'auto'
+
     if (typeof data.log !== 'string') return
     const result = applyTaskLogUpdate(tab, data)
     if (result === 'resync') {
@@ -902,7 +907,26 @@ export function useSchedulerLogic() {
       return
     }
     if (result === 'replace') pendingLogResyncs.delete(tab.key)
-    scheduleLogContentUpdate(tab, tab.logBuffer)
+
+    // 钉选脚本不在运行中（或日志为空）时回退主日志，避免面板闪空
+    let newContent = tab.logBuffer
+    if (selection !== 'auto') {
+      const pinned = tab.scriptLogs[selection]
+      if (pinned !== undefined) newContent = pinned
+    }
+    scheduleLogContentUpdate(tab, newContent)
+  }
+
+  // 切换日志面板钉选的脚本；'auto' 恢复跟随主日志。切换后立刻用已缓存的
+  // scriptLogs 重放一次，不用等下一条日志事件。
+  const selectLogScript = (tab: SchedulerTab, selection: string) => {
+    tab.logScriptSelection = selection
+    const logs = tab.scriptLogs ?? {}
+    let content = tab.lastLogContent
+    if (selection !== 'auto' && logs[selection] !== undefined) {
+      content = logs[selection]
+    }
+    scheduleLogContentUpdate(tab, content, true)
   }
 
   const handleTaskNotice = async (tab: SchedulerTab, data: WSTaskNoticeData) => {
@@ -1473,6 +1497,9 @@ export function useSchedulerLogic() {
 
     // keep-alive 激活/停用
     setSchedulerViewActive,
+
+    // 日志操作
+    selectLogScript,
 
     // 电源操作
     onPowerActionChange,

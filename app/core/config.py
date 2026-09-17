@@ -3456,8 +3456,9 @@ class AppConfig(GlobalConfig):
         queue_uid = uuid.UUID(queue_id)
         queue_item_uid = uuid.UUID(queue_item_id)
         # 循环调度参数每轮都会重读，运行中改没问题；换脚本会让任务的脚本列表
-        # 与队列对不上号，必须拦住。
-        if "Info" in data:
+        # 与队列对不上号，必须拦住。Info 组里的其余字段（并行开关等）不破坏
+        # 下标对应关系，照常放行。
+        if "ScriptId" in data.get("Info", {}):
             self._ensure_cycle_safe(queue_uid, "更换队列项的脚本")
 
         await self.QueueConfig[queue_uid].QueueItem[queue_item_uid].update(data)

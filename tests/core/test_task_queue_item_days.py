@@ -46,7 +46,10 @@ class QueueItemRunDaysTest(unittest.IsolatedAsyncioTestCase):
                 uuid.UUID(run_id): MagicMock(),
                 uuid.UUID(skip_id): MagicMock(),
             }
-            await task._run_script_list(0)
+            # 一行多脚本重构后调度入口为 _run_script_at_index：逐项驱动，
+            # 闸门/预约语义与原顺序循环一致
+            await task._run_script_at_index(0)
+            await task._run_script_at_index(1)
 
         self.assertEqual(task_info.script_list[1].status, "跳过")
         self.assertEqual(task_info.script_list[0].status, "跳过")

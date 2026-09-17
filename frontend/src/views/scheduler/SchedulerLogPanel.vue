@@ -4,6 +4,14 @@
       <h3>{{ t('scheduler.log.title') }}</h3>
       <div class="log-controls">
         <a-space size="small">
+          <a-select
+            v-if="(scriptOptions ?? []).length > 1"
+            :value="scriptSelection"
+            size="small"
+            class="log-script-select"
+            :options="scriptOptions"
+            @change="(value: any) => emit('selectScript', value)"
+          />
           <a-button
             size="small"
             :type="logMode === 'follow' ? 'primary' : 'default'"
@@ -50,7 +58,16 @@ const { t } = useI18n()
 interface Props {
   logContent: string
   externalLogMode?: 'follow' | 'browse' // 外部控制的日志模式
+  // 并行运行时的脚本日志选项；多于一个时展示脚本切换选择器
+  scriptOptions?: Array<{ label: string; value: string }>
+  scriptSelection?: string // 'auto' 跟随主日志，其余为钉选的脚本 ID
 }
+
+interface Emits {
+  (_e: 'selectScript', _value: string): void
+}
+
+const emit = defineEmits<Emits>()
 
 // 日志显示模式类型
 type LogMode = 'follow' | 'browse'
@@ -314,5 +331,11 @@ onUnmounted(() => {
   font-size: 14px;
   color: var(--ant-color-text-secondary);
   margin: 0;
+}
+
+/* 并行日志的脚本切换：与跟随/浏览按钮同一控制行，紧凑宽度 */
+.log-script-select {
+  min-width: 120px;
+  max-width: 200px;
 }
 </style>

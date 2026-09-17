@@ -645,6 +645,10 @@ class QueueItem(ConfigBase):
             "-",
             MultipleUIDValidator("-", self.related_config, "ScriptConfig"),
         )
+        ## 是否与上一队列项并行执行; 连续开启的队列项归入同一组同时运行,
+        ## 组与组之间仍按顺序执行。共用脚本、模拟器实例或安装路径的队列项
+        ## 会在调度时被自动拆回顺序执行。
+        self.Info_Parallel = ConfigItem("Info", "Parallel", False, BoolValidator())
 
         ## Schedule --------------------------------------------------------
         ## 是否参与循环调度

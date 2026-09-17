@@ -28,6 +28,7 @@ interface Script {
   script_id: string
   status: string
   name: string
+  parallel?: boolean
   user_list: User[]
 }
 
@@ -77,6 +78,7 @@ const applyTaskInfo = (taskInfo: any[] | undefined) => {
     script_id: task.script_id || `script_${index}`,
     name: task.name || t('scheduler.overview.unknownScript'),
     status: task.status || '等待',
+    parallel: task.parallel ?? false,
     user_list: task.userList ? [...task.userList] : [], // 注意：后端使用 userList，前端使用 user_list
   }))
 

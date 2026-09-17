@@ -3261,11 +3261,14 @@ export default {
       add: 'Add task',
       colIndex: '#',
       colScript: 'Script task',
-      colDays: 'Run on',
       colActions: 'Actions',
       dragSort: 'Drag to reorder',
       selectScript: 'Select a script',
       deleteConfirm: 'Delete this task?',
+      deleteRowConfirm: 'Delete the whole batch? All tasks in this batch will be removed.',
+      addScript: 'Add',
+      addScriptTip:
+        'Adds another script to this batch; it runs together with the other scripts in this batch. For cycle queues it fires on the batch schedule.',
     },
     cycle: {
       colConfig: 'Cycle schedule',
@@ -3375,6 +3378,7 @@ export default {
       title: 'Log',
       follow: 'Follow',
       browse: 'Browse',
+      followScript: 'Follow task',
       empty: 'No data',
       truncated:
         'The log is long — only the most recent output is shown here. The full log still goes to the history.',
@@ -3382,6 +3386,8 @@ export default {
     overview: {
       title: 'Task overview',
       unknownScript: 'Unknown script',
+      parallelGroup: 'Parallel group {n}',
+      serialDivider: 'Serial · waits for the previous group',
     },
     modal: {
       cannotDeleteTitle: 'Cannot close this console',

@@ -511,9 +511,13 @@ const refreshQueueItems = async () => {
 
           const queueItemData = response.data[queueItemId]
           if (queueItemData?.Info) {
+            // 后端用 "-" 哨兵表示未选择脚本，归一为空串：
+            // 既让下拉框正确显示占位文案，也让并行开关在未选脚本时禁用
+            const scriptId = queueItemData.Info.ScriptId || ''
             queueItems.push({
               id: queueItemId,
-              script: queueItemData.Info.ScriptId || '',
+              script: scriptId === '-' ? '' : scriptId,
+              parallel: queueItemData.Info.Parallel ?? false,
               schedule: { ...(queueItemData.Schedule || {}) },
             })
           }
