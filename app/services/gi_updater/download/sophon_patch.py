@@ -479,10 +479,15 @@ class SophonPatcher:
             target = _resolve_target_path(self.game_path, asset.target_file_path)
             if self._is_target_complete(target, asset):
                 counts[asset.patch_method.value] += 1
+                # 跳过 = 本次不用从网络取任何字节，只记条数。字节口径见下面两处
+                # advance(len(chunk_data))：总量按计划里的 Σ patch_chunk_length，
+                # 这里再按新文件大小入账会把进度灌满、把速度显示抬高。
                 if self.progress:
-                    self.progress.advance(asset.target_file_size)
+                    self.progress.advance(0, count=1)
                 continue
 
+            # DownloadOver 已不再由 build_patch_assets 产出（差分没点名的文件本轮
+            # 不动），留着是为了全量兜底路径能复用同一套分派
             if asset.patch_method == SophonPatchMethod.DownloadOver:
                 ok = self._download_over(asset)
             elif asset.patch_method == SophonPatchMethod.CopyOver:
@@ -491,6 +496,8 @@ class SophonPatcher:
                 ok = self._patch_hdiff(asset)
 
             counts[asset.patch_method.value] += 1 if ok else 0
+            if ok and self.progress:
+                self.progress.advance(0, count=1)
             if not ok:
                 self.logger.warning(
                     "补丁失败：%s（%s）",
@@ -551,11 +558,23 @@ class SophonPatcher:
             return self._apply_hdiff_bytes(chunk_data, None, target, asset)
 
         os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
-        with open(target, "a+b") as handle:
-            if handle.tell() < asset.target_file_size:
-                handle.truncate(asset.target_file_size)
-            handle.seek(asset.patch_offset)
-            handle.write(chunk_data)
+        # 这条分片本身就是**完整的新文件**（实测 82 条 CopyOver 全部满足
+        # patch_chunk_length == target_file_size）。两个坑一起避开：
+        #   1. ``patch_offset`` 是它在差分档案里的偏移，不是目标文件里的偏移
+        #      （实测 67/82 条非零），拿它当目标偏移会写错位置；
+        #   2. 追加模式（a+b）下写入永远落在文件末尾、seek 失效，预分配再写
+        #      会把文件撑成两倍大。
+        # 所以整份写到 .temp 再原子替换，旧文件在成功前保持原样。
+        temp_path = target + ".temp"
+        try:
+            with open(temp_path, "wb") as handle:
+                handle.write(chunk_data)
+            if os.path.isfile(target):
+                os.remove(target)
+            os.replace(temp_path, target)
+        finally:
+            if os.path.isfile(temp_path):
+                _remove_quiet(temp_path)
 
         if self.progress:
             self.progress.advance(len(chunk_data))
@@ -598,8 +617,9 @@ class SophonPatcher:
             ``pending_hdiff`` 并返回 ``False``。
 
         Note:
-            先写临时文件 ``<target>_tmp``，成功后再替换 ``target``；
-            旧文件存在时先删除再替换。
+            先写 ``<target>.temp``，成功后删旧文件再原子替换；失败只留一个 temp
+            并被清掉。差分切片与「从零重建」的空引用文件用完立刻删除——它们原本
+            会留在缓存目录直到整轮结束，一次更新能白占好几 GiB。
         """
         if not self.hdiff.available:
             self.pending_hdiff.append(asset)
@@ -613,16 +633,17 @@ class SophonPatcher:
         with open(diff_path, "wb") as handle:
             handle.write(chunk_data)
 
+        temp_path = target + ".temp"
+        stub_path = ""
         old_file = old_path
         if old_file is None or not os.path.isfile(old_file):
             # 没有原文件时，写一个空的 .diff_ref 代表「从零重建」
-            old_file = os.path.join(
+            old_file = stub_path = os.path.join(
                 self.patch_output_dir, _safe_name(asset.target_file_path) + ".diff_ref"
             )
             with open(old_file, "wb"):
                 pass
 
-        temp_path = target + "_tmp"
         try:
             self.hdiff.patch(diff_path, old_file, temp_path)
             if os.path.isfile(target):
@@ -630,10 +651,10 @@ class SophonPatcher:
             os.replace(temp_path, target)
         finally:
             if os.path.isfile(temp_path):
-                try:
-                    os.remove(temp_path)
-                except OSError:  # pragma: no cover
-                    pass
+                _remove_quiet(temp_path)
+            _remove_quiet(diff_path)
+            if stub_path:
+                _remove_quiet(stub_path)
 
         if self.progress:
             self.progress.advance(len(chunk_data))
@@ -777,3 +798,19 @@ def _safe_name(name: str) -> str:
         把分隔符与冒号替换为下划线后的平面文件名，无法用于跳出目录。
     """
     return name.replace("\\", "_").replace("/", "_").replace(":", "_")
+
+
+def _remove_quiet(path: str) -> None:
+    """删一个中间产物文件，不存在或删不掉都不抛。
+
+    Args:
+        path: 要删除的临时文件路径。
+
+    Note:
+        临时文件删不掉不该让整次更新失败——它只是白占点磁盘，下次清理或手工删除
+        都能解决；把异常冒上去会把已经写好的游戏文件也一起判失败。
+    """
+    try:
+        os.remove(path)
+    except OSError:
+        pass

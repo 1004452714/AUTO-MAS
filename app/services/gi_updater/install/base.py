@@ -39,7 +39,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from app.services.gi_updater.api.client import HttpClient, mask_url_password
 from app.services.gi_updater.api.launcher_api import LauncherApi
@@ -57,7 +57,10 @@ from app.services.gi_updater.download import (
     SophonPatcher,
     build_patch_assets,
 )
-from app.services.gi_updater.download.sophon import MAIN_MATCHING_FIELD
+from app.services.gi_updater.download.sophon import (
+    MAIN_MATCHING_FIELD,
+    _resolve_target_path,
+)
 from app.services.gi_updater.versioning import GameInstallStateEnum, GameVersionBase
 
 __all__ = [
@@ -238,10 +241,6 @@ class InstallManagerBase:
 
         #: 本次流程里选中的语音语言（locale code 列表）
         self.sophon_voice_languages: List[str] = []
-        #: 协作式中止判定，透传给下载器与补丁器
-        self.should_abort: Optional[Callable[[], bool]] = None
-        #: hpatchz 可执行文件路径；None 时按 PATH 查找
-        self.hdiff_executable: Optional[str] = None
         #: 协作式中止判定，透传给下载器与补丁器
         self.should_abort: Optional[Callable[[], bool]] = None
         #: hpatchz 可执行文件路径；None 时按 PATH 查找
@@ -688,6 +687,39 @@ class InstallManagerBase:
         plan.file_count = len(assets)
         plan.total_size = sum(asset.patch_chunk_length for asset in assets)
 
+    def sophon_patch_space_need(self, plan: UpdatePlan) -> Tuple[int, int, int]:
+        """估算这次差分更新要占多少磁盘。
+
+        Args:
+            plan: 已收集好 ``patch_assets`` 的计划（``kind`` 应为 SophonPatch）。
+
+        Returns:
+            三元组 ``(还要从网络取的字节, 新文件净落盘增量, 在飞峰值)``。
+            放行判断只看后两项之和：分片是过手即删的中间物，真正长驻磁盘的是
+            更新后的新文件。
+
+        Note:
+            「还要不要下」用文件大小做廉价判定（不比对 MD5）：整轮 1151 个文件
+            逐个算哈希会把门禁本身拖成几分钟的读盘。判断偏保守一侧——尺寸相同但
+            内容不对的文件会被少算一次分片，余量（宿主给的固定缓冲）覆盖这种误差。
+            在飞峰值取单个最大新文件加单个最大分片，对应「temp 与旧文件短暂共存、
+            切片用完才删」的实际占用。
+        """
+        download_left = 0
+        write_growth = 0
+        peak_target = 0
+        peak_slice = 0
+        for asset in plan.patch_assets:
+            target = _resolve_target_path(self.game_path, asset.target_file_path)
+            current = os.path.getsize(target) if os.path.isfile(target) else -1
+            if current == asset.target_file_size:
+                continue
+            download_left += asset.patch_chunk_length
+            write_growth += max(0, asset.target_file_size - max(current, 0))
+            peak_target = max(peak_target, asset.target_file_size)
+            peak_slice = max(peak_slice, asset.patch_chunk_length)
+        return download_left, write_growth, peak_target + peak_slice
+
     @staticmethod
     def _is_excluded(matching_field: str, patterns: Sequence[str]) -> bool:
         """判断 matching_field 是否命中任一 fnmatch 排除模式。
@@ -969,11 +1001,31 @@ class InstallManagerBase:
 
     # ================================================================== 清理
 
-    def cleanup_temp(self) -> None:
-        """清掉 Sophon / zip 链路产生的临时产物。"""
+    def cleanup_temp(self, *, keep_patch_cache: bool = False) -> List[str]:
+        """处理 Sophon / zip 链路产生的临时产物，返回保留下来的目录。
+
+        Args:
+            keep_patch_cache: 为真时**保留**下载缓存（差分切片与差分档案目录），
+                供下一次从断点接着用；失败与中止路径要传真，成功收尾传假。
+
+        Returns:
+            本次保留下来的缓存目录绝对路径（已全部清掉时为空列表）。
+
+        Note:
+            散落在游戏各目录下的 ``*.temp`` 半成品只在写单个文件时短暂存在，
+            正常与异常路径都会就地删除；这里不做全目录递归清扫——为一路上万个
+            文件做一次遍历只为找几个残留，代价不值。进程被强杀留下的个别
+            ``.temp`` 可以手工删，不影响游戏。
+        """
         if not self.game_path or self.dry_run:
-            return
+            return []
+        kept: List[str] = []
         for name in ("chunk_auto_mas", "ldiff"):
             path = os.path.join(self.game_path, name)
-            if os.path.isdir(path):
-                shutil.rmtree(path, ignore_errors=True)
+            if not os.path.isdir(path):
+                continue
+            if keep_patch_cache:
+                kept.append(path)
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+        return kept

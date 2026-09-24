@@ -454,6 +454,8 @@ async def _run_update(
         hdiff_executable=hpatchz,
     )
 
+    # 走到哪儿都按「没成」起步：异常可能发生在赋值之前，收尾据此决定缓存留不留
+    keep_cache = True
     try:
         # 第一步只算不做：联网枚举清单，得到要下多少、是差分还是整包
         plan = await asyncio.to_thread(updater.check)
@@ -484,6 +486,8 @@ async def _run_update(
             )
 
         result = await asyncio.to_thread(updater.installer.execute, plan)
+        # 只有真成功才清缓存；失败或中止都留着，下一次能接着下而不是从零开始
+        keep_cache = not result.success
         return GenshinUpdateResult(
             success=result.success,
             message=result.message or str(result),
@@ -494,9 +498,11 @@ async def _run_update(
             file_count=result.file_total,
         )
     except UpdateAborted:
-        logger.info("原神更新已中止，下次从断点继续")
+        logger.info("原神更新已中止，已下载的差分缓存会留给下次")
         return GenshinUpdateResult(
-            success=False, aborted=True, message="更新已中止，已完成的部分会保留"
+            success=False,
+            aborted=True,
+            message="更新已中止，已完成的部分与下载缓存都会保留，下次接着更新",
         )
     except Exception as error:  # noqa: BLE001
         logger.opt(exception=True).warning(
@@ -507,7 +513,17 @@ async def _run_update(
         )
     finally:
         abort_event.set()
-        await asyncio.to_thread(updater.installer.cleanup_temp)
+        kept = await asyncio.to_thread(
+            updater.installer.cleanup_temp, keep_patch_cache=keep_cache
+        )
+        if kept:
+            # 只进 app.log：调度台那一行已经说明了失败/中止，路径细节是给排查用的
+            _note(
+                "已保留下载缓存："
+                + "、".join(kept)
+                + "；要手工清理就直接删这些目录，不影响游戏本体，"
+                "只是下次要重新下载"
+            )
 
 
 def _summarize_plan(plan: Any) -> dict[str, str]:
@@ -570,12 +586,23 @@ async def _run_gates(
             "已停止，请用官方启动器更新",
         )
 
-    if not _disk_has_room(game_dir, plan.total_size):
+    # 门禁按真实占用算：分片是过手即删的中间物，真正长驻磁盘的是更新后的新文件，
+    # 只按下载量放行会在盘紧的机器上下载到一半把盘写满。
+    download_left, write_growth, inflight = updater.installer.sophon_patch_space_need(
+        plan
+    )
+    needed = write_growth + inflight
+    _note(
+        f"差分空间估算：还要下 {summarize_size(download_left)}、"
+        f"新文件净增 {summarize_size(write_growth)}、"
+        f"在飞峰值 {summarize_size(inflight)}（放行按后两项）"
+    )
+    if not _disk_has_room(game_dir, needed):
         free = summarize_size(shutil.disk_usage(game_dir).free)
         return await _block(
             plan,
-            f"磁盘剩余 {free}，放不下本次要下的 "
-            f"{summarize_size(plan.total_size)}，请先清理",
+            f"磁盘剩余 {free}，本次增量更新要同时放下差分包和更新后的文件"
+            f"（约需 {summarize_size(needed)}），请先清理后再试",
         )
 
     await _report(on_progress, f"准备就绪，开始下载 {summarize_size(plan.total_size)}")

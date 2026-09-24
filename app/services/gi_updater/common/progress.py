@@ -99,11 +99,16 @@ class ProgressSnapshot:
 class ProgressBase:
     """线程安全的进度累加器 + 速度/ETA 计算。
 
-    速率用滑动窗口（每 250ms 刷新一次）而不是瞬时值，避免界面抖动。
-    而不是瞬时值，避免 UI 抖动。
+    上报节流用 ``EMIT_INTERVAL_SEC``，速度用 ``SPEED_WINDOW_SEC`` 的滑动窗口——
+    两者刻意分开：差分链路是「取回一段 → 停下打补丁 → 再取一段」，入账本身是
+    整段一次性跳变，用 250ms 这么短的窗口算速度会把交替放大成尖峰与 0，
+    界面上就是速度忽高忽低、剩余时间乱跳。
     """
 
-    REFRESH_INTERVAL_SEC = 0.25
+    #: 两次上报的最小间隔（保持界面刷新手感）
+    EMIT_INTERVAL_SEC = 0.25
+    #: 速度滑动窗口长度；窗口未满时沿用上一个速度值
+    SPEED_WINDOW_SEC = 1.0
 
     def __init__(self, listener: "Optional[ProgressListener]" = None) -> None:
         """初始化进度累加器与速率窗口。
@@ -198,7 +203,7 @@ class ProgressBase:
     def _recalculate_speed(self, force: bool) -> None:
         """按滑动窗口重算速度（字节/秒）与剩余时间。
 
-        窗口未达 ``REFRESH_INTERVAL_SEC``（且非强制）时直接返回，避免高频抖动；
+        窗口未满 ``SPEED_WINDOW_SEC``（且非强制）时直接返回，沿用上次的速度值；
         速度 ≤ 0 或剩余字节 ≤ 0 时剩余时间归零。
 
         Args:
@@ -206,7 +211,14 @@ class ProgressBase:
         """
         now = time.monotonic()
         elapsed = now - self._window_started
-        if not force and elapsed < self.REFRESH_INTERVAL_SEC:
+        # 开局还没有任何速度值时先按上报节奏算一次，否则刚开始下载会白显示 1 秒的
+        # 0 B/s；之后仍按 1 秒窗口出数，这个初值会很快被修正
+        cold_start = (
+            self._snapshot.speed <= 0
+            and self._window_bytes > 0
+            and elapsed >= self.EMIT_INTERVAL_SEC
+        )
+        if not force and not cold_start and elapsed < self.SPEED_WINDOW_SEC:
             return
         if elapsed <= 0:
             return
@@ -230,7 +242,7 @@ class ProgressBase:
         """
         self._recalculate_speed(force)
         now = time.monotonic()
-        if not force and now - self._last_emit < self.REFRESH_INTERVAL_SEC:
+        if not force and now - self._last_emit < self.EMIT_INTERVAL_SEC:
             return
         self._last_emit = now
         self.listener.on_progress(self.snapshot())
