@@ -39,7 +39,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from app.services.gi_updater.api.client import HttpClient, mask_url_password
 from app.services.gi_updater.api.launcher_api import LauncherApi
@@ -100,6 +100,30 @@ class UpdateKind(str, Enum):
 
 
 @dataclass
+class PatchSpaceNeed:
+    """一次差分更新对磁盘的占用估算（见 :meth:`InstallManagerBase.sophon_patch_space_need`）。"""
+
+    #: 本轮还要从网络取的字节数（本地尺寸已对上的文件不计）
+    download_left: int = 0
+    #: 更新后新文件相对现状的净落盘增量
+    write_growth: int = 0
+    #: 单个文件的在飞峰值（temp 与旧文件短暂共存 + 一个未删的切片）
+    peak: int = 0
+    #: 本地尺寸已对上、本轮只需复核不必下载的文件数
+    already_done: int = 0
+
+    @property
+    def disk_need(self) -> int:
+        """放行判断要用的空间：净落盘增量加在飞峰值。
+
+        Returns:
+            ``write_growth + peak``；切片是过手即删的中间物，所以不含
+            `download_left`。
+        """
+        return self.write_growth + self.peak
+
+
+@dataclass
 class UpdatePlan:
     """一次更新的完整计划（dry-run 的产物）。"""
 
@@ -129,6 +153,8 @@ class UpdatePlan:
     #: 统计
     total_size: int = 0
     file_count: int = 0
+    #: 差分链路的磁盘占用与本轮待下量估算（``kind == SophonPatch`` 时才有）
+    space_need: Optional[PatchSpaceNeed] = None
 
     @property
     def is_preload(self) -> bool:
@@ -686,39 +712,39 @@ class InstallManagerBase:
         plan.removed_files = removed
         plan.file_count = len(assets)
         plan.total_size = sum(asset.patch_chunk_length for asset in assets)
+        # 顺手把磁盘与本轮待下量算好：门禁与进度分母都用它，stat 只走这一遍
+        plan.space_need = self.sophon_patch_space_need(plan)
 
-    def sophon_patch_space_need(self, plan: UpdatePlan) -> Tuple[int, int, int]:
+    def sophon_patch_space_need(self, plan: UpdatePlan) -> PatchSpaceNeed:
         """估算这次差分更新要占多少磁盘。
 
         Args:
             plan: 已收集好 ``patch_assets`` 的计划（``kind`` 应为 SophonPatch）。
 
         Returns:
-            三元组 ``(还要从网络取的字节, 新文件净落盘增量, 在飞峰值)``。
-            放行判断只看后两项之和：分片是过手即删的中间物，真正长驻磁盘的是
-            更新后的新文件。
+            :class:`PatchSpaceNeed`：本轮还要下的字节、新文件净落盘增量、在飞峰值，
+            以及本地尺寸已对上、不必再下的文件数。
 
         Note:
-            「还要不要下」用文件大小做廉价判定（不比对 MD5）：整轮 1151 个文件
-            逐个算哈希会把门禁本身拖成几分钟的读盘。判断偏保守一侧——尺寸相同但
-            内容不对的文件会被少算一次分片，余量（宿主给的固定缓冲）覆盖这种误差。
-            在飞峰值取单个最大新文件加单个最大分片，对应「temp 与旧文件短暂共存、
+            「还要不要下」用文件大小做廉价判定（不比对 MD5）：整轮上千个文件逐个
+            算哈希会把估算本身拖成几分钟的读盘。判断偏保守一侧——尺寸相同但内容
+            不对的文件会被少算一次分片，宿主给的固定余量覆盖这种误差。在飞峰值按
+            单个文件的新大小加它自己的分片取最大，对应「temp 与旧文件短暂共存、
             切片用完才删」的实际占用。
         """
-        download_left = 0
-        write_growth = 0
-        peak_target = 0
-        peak_slice = 0
+        need = PatchSpaceNeed()
         for asset in plan.patch_assets:
             target = _resolve_target_path(self.game_path, asset.target_file_path)
             current = os.path.getsize(target) if os.path.isfile(target) else -1
             if current == asset.target_file_size:
+                need.already_done += 1
                 continue
-            download_left += asset.patch_chunk_length
-            write_growth += max(0, asset.target_file_size - max(current, 0))
-            peak_target = max(peak_target, asset.target_file_size)
-            peak_slice = max(peak_slice, asset.patch_chunk_length)
-        return download_left, write_growth, peak_target + peak_slice
+            need.download_left += asset.patch_chunk_length
+            need.write_growth += max(0, asset.target_file_size - max(current, 0))
+            need.peak = max(
+                need.peak, asset.target_file_size + asset.patch_chunk_length
+            )
+        return need
 
     @staticmethod
     def _is_excluded(matching_field: str, patterns: Sequence[str]) -> bool:
@@ -858,11 +884,16 @@ class InstallManagerBase:
 
         Args:
             plan: 计划对象，提供总字节数与文件数。
+
+        Note:
+            差分链路的字节分母用「本轮还要下的量」而不是计划全量：续传时大部分
+            文件本地已经更新好，按全量算分母会一直显示零头、跑完也到不了 100%。
         """
         if self.progress is None:
             return
+        pending = plan.space_need.download_left if plan.space_need else 0
         self.progress.set_activity(f"更新 {self.preset.profile_name}")
-        self.progress.set_total(plan.total_size, plan.file_count)
+        self.progress.set_total(pending or plan.total_size, plan.file_count)
 
     def _new_downloader(self) -> SophonDownloader:
         """新建一个 Sophon 下载器实例（按当前会话参数装配）。

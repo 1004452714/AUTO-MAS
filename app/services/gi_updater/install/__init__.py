@@ -22,6 +22,7 @@ from app.services.gi_updater.install.base import (
     DEFAULT_VOICE_LOCALE,
     InstallManagerBase,
     InstallResult,
+    PatchSpaceNeed,
     UpdateKind,
     UpdatePlan,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "DEFAULT_VOICE_LOCALE",
     "InstallManagerBase",
     "InstallResult",
+    "PatchSpaceNeed",
     "UpdateKind",
     "UpdatePlan",
 ]

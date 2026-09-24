@@ -472,6 +472,10 @@ class SophonPatcher:
             相关项记入 ``self.pending_hdiff`` 而非计入统计。
         """
         counts: Dict[str, int] = {method.value: 0 for method in SophonPatchMethod}
+        # 一进来先复核本地：尺寸对得上的文件要读全文件算 MD5 才敢跳过，续传时
+        # 这一段可能比下载还久。不标阶段的话界面上就是「0 B / 待下量」一动不动。
+        if self.progress:
+            self.progress.set_stage("verify", "校验本地文件")
 
         for asset in assets:
             if self.should_abort is not None and self.should_abort():
@@ -485,6 +489,9 @@ class SophonPatcher:
                 if self.progress:
                     self.progress.advance(0, count=1)
                 continue
+
+            if self.progress and self.progress.snapshot().stage != "download":
+                self.progress.set_stage("download", "下载中")
 
             # DownloadOver 已不再由 build_patch_assets 产出（差分没点名的文件本轮
             # 不动），留着是为了全量兜底路径能复用同一套分派

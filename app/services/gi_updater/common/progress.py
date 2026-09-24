@@ -68,6 +68,8 @@ class ProgressSnapshot:
     """某一时刻的进度快照。"""
 
     activity: str = ""
+    #: 所处阶段：``""`` 未标注、``verify`` 复核本地文件、``download`` 取数落盘
+    stage: str = ""
     # 总进度
     total_size: int = 0
     current_size: int = 0
@@ -149,6 +151,20 @@ class ProgressBase:
             activity: 当前活动文案（如「下载中」「校验中」）。
         """
         self._update(activity=activity)
+        self.emit(force=True)
+
+    def set_stage(self, stage: str, activity: str) -> None:
+        """切换阶段并更新活动文案，立即强制上报一次。
+
+        Args:
+            stage: ``verify``（复核本地文件）或 ``download``（取数落盘）。
+            activity: 与该阶段对应的活动文案。
+
+        Note:
+            文案不变、只换阶段时也强制上报，否则宿主那边按文本去重会把
+            「开始下载」这条关键变化吞掉。
+        """
+        self._update(stage=stage, activity=activity)
         self.emit(force=True)
 
     def set_total(self, total_size: int = 0, total_count: int = 0) -> None:

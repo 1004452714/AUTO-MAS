@@ -77,6 +77,8 @@ _MIN_EXECUTABLE_SIZE = 1 << 16
 _DISK_MARGIN_BYTES = 2 * 1024**3
 #: 进度行推送的最小间隔（秒）；阶段变化不受此限
 _PROGRESS_INTERVAL_SEC = 1.0
+#: 文案一字不动时的心跳间隔（秒）——证明还在干活，又不把调度台刷满
+_PROGRESS_HEARTBEAT_SEC = 10.0
 #: 同一目录两次联网检查的最短间隔；一轮调度里多个用户共用一个客户端，
 #: 而一次检查要下载并解析几万条清单，重复付这个代价没有意义
 _MEMO_TTL_SEC = 600.0
@@ -148,15 +150,18 @@ def _format_snapshot(snapshot: ProgressSnapshot) -> str:
         snapshot: 引擎给出的快照。
 
     Returns:
-        形如「下载中 42.1% · 12.3 MiB/s · 剩余 31:20 · 文件名」的单行文本。
+        形如「下载中 42.1%（0.6/1.78 GiB） · 900/1151 个文件 · 12.3 MiB/s · 剩余 31:20」
+        的单行文本；复核本地文件阶段没有字节可算，改成只报条数。
     """
     parts = [snapshot.activity or "下载中"]
-    if snapshot.total_size > 0:
+    # 复核阶段一个字节都不从网络取，用字节百分比表达就是钉在 0%，看不出它在干活
+    show_bytes = snapshot.total_size > 0 and snapshot.stage != "verify"
+    if show_bytes:
         parts.append(
             f"{snapshot.percentage:.1f}%（{summarize_size(snapshot.current_size)}"
             f"/{summarize_size(snapshot.total_size)}）"
         )
-    elif snapshot.total_count > 0:
+    if snapshot.total_count > 0:
         parts.append(f"{snapshot.current_count}/{snapshot.total_count} 个文件")
     if snapshot.speed > 0:
         parts.append(f"{summarize_size(snapshot.speed)}/s")
@@ -172,7 +177,12 @@ class _DispatchProgressListener(ProgressListener):
     """把引擎的进度快照接到宿主回调上（在引擎的下载线程里被调用）。
 
     引擎自带 0.25 秒的节流，但换文件与换阶段会强制穿透，密集起来足以刷爆
-    调度台；这里再压一层：阶段一变立刻发，同阶段内按 :data:`_PROGRESS_INTERVAL_SEC` 限速。
+    调度台；这里再压一层，规则按「有没有新信息」判：
+
+    - 阶段或活动文案变了：立刻发，这是用户最该看到的一刻；
+    - 文案变了（字节、条数、速度在动）：最快每 :data:`_PROGRESS_INTERVAL_SEC` 发一条；
+    - 文案一模一样（续传时复核本地文件，字节一动不动）：降到每
+      :data:`_PROGRESS_HEARTBEAT_SEC` 一条心跳，只证明还活着，不刷屏。
     """
 
     def __init__(
@@ -194,6 +204,7 @@ class _DispatchProgressListener(ProgressListener):
         self._lock = threading.Lock()
         self._last_emit = 0.0
         self._last_activity = ""
+        self._last_text = ""
 
     def on_progress(self, snapshot: ProgressSnapshot) -> None:
         """收到一份进度快照。
@@ -203,14 +214,22 @@ class _DispatchProgressListener(ProgressListener):
         """
         if self._hook is None or self._abort_event.is_set():
             return
+        text = _format_snapshot(snapshot)
         now = time.monotonic()
         with self._lock:
-            activity_changed = snapshot.activity != self._last_activity
-            if not activity_changed and now - self._last_emit < _PROGRESS_INTERVAL_SEC:
+            # 阶段一变立刻发；文案在动就按正常节奏；文案一字不动则只发心跳
+            if snapshot.activity != self._last_activity:
+                limit = 0.0
+            elif text != self._last_text:
+                limit = _PROGRESS_INTERVAL_SEC
+            else:
+                limit = _PROGRESS_HEARTBEAT_SEC
+            if now - self._last_emit < limit:
                 return
             self._last_emit = now
             self._last_activity = snapshot.activity
-        self._post(_format_snapshot(snapshot))
+            self._last_text = text
+        self._post(text)
 
     def on_message(self, message: str, level: str = "info") -> None:
         """引擎的一条流程消息，原样转成一行进度文案。
@@ -464,11 +483,20 @@ async def _run_update(
             # 常态结论：只留 app.log，不刷任务日志
             _note(f"原神客户端已是最新（{summary['local_version'] or '?'}）")
         else:
+            # 报「本轮还要下多少」而不是计划全量：续传时全量数字会让人以为要从
+            # 头下一遍，而实际只剩没打完的那部分
+            need = plan.space_need
+            pending = need.download_left if need else plan.total_size
+            counted = (
+                f"（{plan.file_count} 个文件，本地已就绪 {need.already_done} 个）"
+                if need
+                else f"（{plan.file_count} 个文件）"
+            )
             await _report(
                 on_progress,
                 f"{summary['state_label']} · {summary['kind_label']} · "
-                f"{summary['version_line']} · 待下载 {summary['size_line']}"
-                f"（{plan.file_count} 个文件）",
+                f"{summary['version_line']} · 待下载 {summarize_size(pending)}"
+                + counted,
             )
 
         blocked = await _run_gates(plan, game_dir, updater, on_progress)
@@ -534,7 +562,7 @@ def _summarize_plan(plan: Any) -> dict[str, str]:
 
     Returns:
         含 ``state_label`` / ``kind_label`` / ``local_version`` / ``remote_version``
-        / ``version_line`` / ``size_line`` 的字典。
+        / ``version_line`` 的字典。
     """
     from app.services.gi_updater.versioning import GAME_STATE_LABELS
 
@@ -546,7 +574,6 @@ def _summarize_plan(plan: Any) -> dict[str, str]:
         "local_version": local_version,
         "remote_version": remote_version,
         "version_line": f"{local_version or '未安装'} -> {remote_version or '?'}",
-        "size_line": summarize_size(plan.total_size),
     }
 
 
@@ -587,25 +614,32 @@ async def _run_gates(
         )
 
     # 门禁按真实占用算：分片是过手即删的中间物，真正长驻磁盘的是更新后的新文件，
-    # 只按下载量放行会在盘紧的机器上下载到一半把盘写满。
-    download_left, write_growth, inflight = updater.installer.sophon_patch_space_need(
-        plan
-    )
-    needed = write_growth + inflight
-    _note(
-        f"差分空间估算：还要下 {summarize_size(download_left)}、"
-        f"新文件净增 {summarize_size(write_growth)}、"
-        f"在飞峰值 {summarize_size(inflight)}（放行按后两项）"
-    )
-    if not _disk_has_room(game_dir, needed):
+    # 只按下载量放行会在盘紧的机器上下载到一半把盘写满。数值在算计划时一次统计好，
+    # 这里只读结果，不再对上千个文件重复 stat。
+    need = plan.space_need
+    if need is not None:
+        _note(
+            f"差分空间估算：还要下 {summarize_size(need.download_left)}、"
+            f"新文件净增 {summarize_size(need.write_growth)}、"
+            f"在飞峰值 {summarize_size(need.peak)}、"
+            f"本地已就绪 {need.already_done}/{plan.file_count} 个"
+        )
+        required = need.disk_need
+    else:
+        required = plan.total_size
+    if not _disk_has_room(game_dir, required):
         free = summarize_size(shutil.disk_usage(game_dir).free)
         return await _block(
             plan,
             f"磁盘剩余 {free}，本次增量更新要同时放下差分包和更新后的文件"
-            f"（约需 {summarize_size(needed)}），请先清理后再试",
+            f"（约需 {summarize_size(required)}），请先清理后再试",
         )
 
-    await _report(on_progress, f"准备就绪，开始下载 {summarize_size(plan.total_size)}")
+    await _report(
+        on_progress,
+        f"准备就绪，开始下载 "
+        f"{summarize_size(need.download_left if need else plan.total_size)}",
+    )
     return None
 
 
