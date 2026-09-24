@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from app.services.gi_updater.api.client import HttpClient
+from app.services.gi_updater.api.client import HttpClient, mask_url_password
 from app.services.gi_updater.api.launcher_api import LauncherApi
 from app.services.gi_updater.api.profiles import PresetConfig
 from app.services.gi_updater.common.logging import get_logger
@@ -362,8 +362,10 @@ class InstallManagerBase:
                 and self.preset_urls is not None
                 and self.preset_urls.patch_url
             ):
+                # 差分基线要对上响应 stats 里的键，那些键是 3 段版本串（``7.0.0``）；
+                # 用解析后的 4 段（``7.0.0.0``）永远对不上，会被判成没有差分
                 patch_pair = self.get_sophon_patch_pair(
-                    version_update_from=installed.version_string, is_preload=is_preload
+                    version_update_from=installed.sophon_tag, is_preload=is_preload
                 )
                 if patch_pair is not None and patch_pair.is_found:
                     plan.patch_pair = patch_pair
@@ -449,7 +451,9 @@ class InstallManagerBase:
             tag=tag,
         )
         self.logger.debug(
-            "getBuild(%s) -> %s", "preload" if is_preload else "main", url
+            "getBuild(%s) -> %s",
+            "preload" if is_preload else "main",
+            mask_url_password(url),
         )
 
         return SophonManifest.create_info_pair(
@@ -501,9 +505,11 @@ class InstallManagerBase:
             无分支 / 未找到清单时返回 ``None``。
 
         Note:
-            与 :meth:`get_sophon_pair` 的 GET 不同，**差分清单走 POST**（URL 相同、
-            仅方法不同）。``tag`` 仍须用 API 返回的**原始 3 段版本串**，补成 4 段会被
-            服务端判为 ``-202 not found``。
+            差分清单走的是独立端点 :cvar:`SophonChunkUrls.patch_url`
+            （``getPatchBuild``，只收 POST），与 :meth:`get_sophon_pair` 用的
+            ``getBuild``（只收 GET）不通用——发错端点或发错方法都会被服务端判 405。
+            基线版本不在 URL 上：响应里每份清单的 ``stats`` 以基线版本为键，
+            由调用方按本机已装版本去挑，挑不到即视为没有可用差分。
         """
         if self.preset_urls is None or not self.preset_urls.patch_url:
             return None
@@ -518,14 +524,19 @@ class InstallManagerBase:
         if branch is None or not branch.package_id:
             return None
 
-        # ：patch URL 固定用
-        # branch=main / predownload + 目标分支的 package_id/password
-        url = self.preset.build_get_build_url(
+        # 差分端点的查询串与主清单同形：branch 用主/预下载分支名，
+        # package_id 与 password 取该分支下发的值
+        url = self.preset.build_sophon_query_url(
+            self.preset_urls.patch_url,
             package_id=branch.package_id,
             branch="predownload" if is_preload else "main",
             password=branch.password,
         )
-        self.logger.debug("getBuild(patch) -> %s (from=%s)", url, version_update_from)
+        self.logger.debug(
+            "getPatchBuild -> %s (from=%s)",
+            mask_url_password(url),
+            version_update_from,
+        )
 
         return SophonManifest.create_patch_info_pair(
             self.client,
@@ -656,21 +667,26 @@ class InstallManagerBase:
             plan: 计划对象，其 ``patch_pair`` / ``main_pair`` 必须已就绪。
 
         Note:
-            经 :func:`download.build_patch_assets` 计算「源→目标」差异；再交给
-            :meth:`filter_patch_assets` 二次过滤；大小按 ``patch_size`` 回退到
-            ``target_file_size`` 累加。触发前已 ``assert`` 两个清单非空。
+            经 :func:`download.build_patch_assets` 计算「源→目标」差异，按
+            `UpdatePlan.source_version` 的 3 段 tag 挑本机基线那份分片；再交给
+            :meth:`filter_patch_assets` 二次过滤。体量按 ``patch_chunk_length``
+            累加——那才是要从网络取的字节数，与官方差分统计同口径；
+            ``patch_size`` 不是下载量，拿它累加会把约 10 GB 的增量报成上百 GB。
+            触发前已 ``assert`` 两个清单非空。
         """
         assert plan.patch_pair is not None and plan.main_pair is not None
         assets, removed = build_patch_assets(
-            self.client, plan.patch_pair, plan.main_pair, logger=self.logger
+            self.client,
+            plan.patch_pair,
+            plan.main_pair,
+            plan.source_version.sophon_tag if plan.source_version else "",
+            logger=self.logger,
         )
         assets = self.filter_patch_assets(assets)
         plan.patch_assets = assets
         plan.removed_files = removed
         plan.file_count = len(assets)
-        plan.total_size = sum(
-            (asset.patch_size or asset.target_file_size) for asset in assets
-        )
+        plan.total_size = sum(asset.patch_chunk_length for asset in assets)
 
     @staticmethod
     def _is_excluded(matching_field: str, patterns: Sequence[str]) -> bool:
@@ -895,7 +911,7 @@ class InstallManagerBase:
 
         Note:
             失败定义为「仍有待处理的 HDiff 补丁」；字节数只计入被标记 ``needs_download``
-            的资产。
+            的资产，且按 ``patch_chunk_length``（真正要从网络取的字节）累加。
         """
         patcher = SophonPatcher(
             client=self.client,
@@ -914,7 +930,7 @@ class InstallManagerBase:
         result.file_done = sum(counts.values())
         result.file_failed = len(patcher.pending_hdiff)
         result.bytes_downloaded = sum(
-            (asset.patch_size or asset.target_file_size)
+            asset.patch_chunk_length
             for asset in plan.patch_assets
             if asset.needs_download
         )

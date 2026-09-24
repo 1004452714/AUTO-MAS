@@ -16,14 +16,18 @@
 #   You should have received a copy of the GNU Affero General Public License
 #   along with AUTO-MAS. If not, see <https://www.gnu.org/licenses/>.
 
-#   第三方可移植代码声明：本包的分层结构与部分类型定义移植、改写自
-#   CollapseLauncher/Collapse（https://github.com/CollapseLauncher/Collapse，
-#   依据版本 dc47259171794596331dffcf90db85a6ac0415ac），该项目采用 MIT 许可。
-#   全文另见本目录的 LICENSE.Collapse.md。
+#   第三方许可与来源声明：本包按下列项目公开源码所描述的流程与协议用 Python 重新实现，
+#   命名分层与部分类型取自它们，代码与文档中不含其源文件副本。两者均为 MIT 许可；
+#   按该许可要求保留版权声明与许可原文如下，全文另见本目录的 LICENSE.Collapse.md。
+#
+#   - Collapse Launcher  https://github.com/CollapseLauncher/Collapse
+#     依据版本 dc47259171794596331dffcf90db85a6ac0415ac（main，2026-09-20）
+#     Copyright (c) neon-nyan
+#   - Hi3Helper.Sophon   https://github.com/CollapseLauncher/Hi3Helper.Sophon
+#     依据版本 9189e990e2d8ef6a9ee5b3dfd77b41e1874f9cac（Collapse 的子模块）
+#     Copyright (c) 2024-2025 Collapse Launcher
 #
 #   MIT License
-#
-#   Copyright (c) neon-nyan
 #
 #   Permission is hereby granted, free of charge, to any person obtaining a copy
 #   of this software and associated documentation files (the "Software"), to deal

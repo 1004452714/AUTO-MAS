@@ -115,6 +115,17 @@ class GameVersion:
         """（``major.minor.patch.revision``）。"""
         return f"{self.major}.{self.minor}.{self.patch}.{self.revision}"
 
+    @property
+    def sophon_tag(self) -> str:
+        """Sophon 侧的 3 段版本串（``major.minor.patch``）。
+
+        Note:
+            分支 ``tag`` 与差分清单 ``stats`` 的基线键都是 3 段形态，拿 4 段的
+            `version_string` 去对永远对不上：目标版本会被服务端判 ``-202``，
+            差分会被当成不存在。
+        """
+        return f"{self.major}.{self.minor}.{self.patch}"
+
     def as_tuple(self) -> Tuple[int, int, int, int]:
         """返回 4 段版本号的整数元组 ``(major, minor, patch, revision)``。"""
         return (self.major, self.minor, self.patch, self.revision)

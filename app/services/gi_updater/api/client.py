@@ -39,6 +39,7 @@ import gzip
 import json
 import os
 import random
+import re
 import time
 import urllib.error
 import urllib.request
@@ -49,7 +50,13 @@ from typing import Any, Dict, Iterator, Optional
 
 from app.services.gi_updater.common.logging import get_logger
 
-__all__ = ["HttpResponse", "HttpClient", "HttpError", "load_or_create_device_id"]
+__all__ = [
+    "HttpResponse",
+    "HttpClient",
+    "HttpError",
+    "load_or_create_device_id",
+    "mask_url_password",
+]
 
 try:  # pragma: no cover - requests 可选
     import requests  # type: ignore
@@ -59,6 +66,24 @@ except ImportError:  # pragma: no cover
 
 #: 启动器同款 User-Agent 前缀（``HYPContainer`` 版本可随官方升级）
 DEFAULT_USER_AGENT = "HYPContainer/1.16.1.361 (windows 11) collapse-python-updater/1.0"
+
+#: 请求地址里的分支密码，写进日志与异常文本前先打码
+_PASSWORD_QUERY_RE = re.compile(r"(?i)([?&]password=)[^&]*")
+
+
+def mask_url_password(url: str) -> str:
+    """把请求地址里的 ``password=`` 查询参数替换成 ``***``。
+
+    分支密码是启动器内置的公开常量、不是用户凭据；但同一个地址经宿主日志出去时会被
+    打码、经异常文本出去时却是原文，两条日志对不上反而误导排障，所以统一在出口打码。
+
+    Args:
+        url: 原始请求地址。
+
+    Returns:
+        打码后的地址；不含该参数时原样返回。
+    """
+    return _PASSWORD_QUERY_RE.sub(r"\1***", url)
 
 
 def _decode_body(body: bytes, encoding: str) -> bytes:
@@ -367,7 +392,7 @@ class HttpClient:
                 其余错误重试耗尽（默认 5 次指数退避）后仍失败则抛。
         """
         if self.offline:
-            raise HttpError(f"离线模式下禁止网络请求: {url}")
+            raise HttpError(f"离线模式下禁止网络请求: {mask_url_password(url)}")
 
         final_headers = self.build_headers(headers)
         effective_timeout = timeout if timeout is not None else self.timeout
@@ -391,7 +416,9 @@ class HttpClient:
                     and 400 <= status < 500
                     and status not in (408, 429)
                 ):
-                    raise HttpError(f"HTTP {status} 请求失败: {url}", status) from error
+                    raise HttpError(
+                        f"HTTP {status} 请求失败: {mask_url_password(url)}", status
+                    ) from error
                 if attempt >= self.max_retries:
                     break
                 delay = self.retry_backoff * (2 ** (attempt - 1)) + random.uniform(
@@ -407,7 +434,8 @@ class HttpClient:
                 time.sleep(delay)
 
         raise HttpError(
-            f"请求失败（已重试 {self.max_retries} 次）: {url} -> {last_error}"
+            f"请求失败（已重试 {self.max_retries} 次）: "
+            f"{mask_url_password(url)} -> {last_error}"
         )
 
     def _request_with_urllib(
@@ -502,7 +530,8 @@ class HttpClient:
         )
         if response.status_code >= 400:
             error = HttpError(
-                f"HTTP {response.status_code}: {url}", response.status_code
+                f"HTTP {response.status_code}: {mask_url_password(url)}",
+                response.status_code,
             )
             response.close()
             raise error

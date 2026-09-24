@@ -65,11 +65,12 @@ _WIRE_32BIT = 5
 # 用嵌套字典描述「哪些字段是 message、以及它内部又有哪些字段是 message」：
 #     SophonManifestProto: assets(1) -> asset_chunks(2)
 #     SophonPatchProto:    patch_assets(1) -> asset_infos(4) -> chunks(2)
+#                          unused_assets(2) -> asset_infos(2) -> assets(1)
 #
 # 空字典表示「这一层没有嵌套消息」。
 # ---------------------------------------------------------------------------
 MANIFEST_SPEC: Dict[int, Any] = {1: {2: {}}}
-PATCH_SPEC: Dict[int, Any] = {1: {4: {2: {}}}}
+PATCH_SPEC: Dict[int, Any] = {1: {4: {2: {}}}, 2: {2: {1: {}}}}
 
 
 def decode_varint(data: bytes, offset: int) -> Tuple[int, int]:
@@ -435,11 +436,40 @@ class SophonPatchAssetProperty:
 
 
 @dataclass
+class SophonUnusedAssetFile:
+    """``file_name=1, file_size=2, file_md5=3``。"""
+
+    file_name: str = ""
+    file_size: int = 0
+    file_md5: str = ""
+
+
+@dataclass
+class SophonUnusedAssetInfo:
+    """``assets=1``。"""
+
+    assets: List[SophonUnusedAssetFile] = field(default_factory=list)
+
+
+@dataclass
+class SophonUnusedAssetProperty:
+    """``version_tag=1, asset_infos=2``。
+
+    Note:
+        这里列的是「从某个基线升上来后就不再被引用」的旧文件，跨基线混在一起，
+        因此不能直接照单全删——目标清单里仍然存在的同名文件必须留下。
+    """
+
+    version_tag: str = ""
+    asset_infos: List[SophonUnusedAssetInfo] = field(default_factory=list)
+
+
+@dataclass
 class SophonPatchProto:
     """``patch_assets=1, unused_assets=2``。"""
 
     patch_assets: List[SophonPatchAssetProperty] = field(default_factory=list)
-    unused_assets: List[str] = field(default_factory=list)
+    unused_assets: List[SophonUnusedAssetProperty] = field(default_factory=list)
 
 
 def parse_sophon_patch(data: bytes) -> SophonPatchProto:
@@ -480,10 +510,19 @@ def parse_sophon_patch(data: bytes) -> SophonPatchProto:
             asset.asset_infos.append(info)
         proto.patch_assets.append(asset)
 
-    for raw in message.get_all(2):
-        if isinstance(raw, bytes):
-            proto.unused_assets.append(raw.decode("utf-8", errors="replace"))
-        elif isinstance(raw, ProtoMessage):
-            proto.unused_assets.append(raw.get_string(1))
+    for unused_message in message.get_messages(2):
+        unused = SophonUnusedAssetProperty(version_tag=unused_message.get_string(1))
+        for info_message in unused_message.get_messages(2):
+            info = SophonUnusedAssetInfo()
+            for file_message in info_message.get_messages(1):
+                info.assets.append(
+                    SophonUnusedAssetFile(
+                        file_name=file_message.get_string(1),
+                        file_size=file_message.get_int(2),
+                        file_md5=file_message.get_string(3),
+                    )
+                )
+            unused.asset_infos.append(info)
+        proto.unused_assets.append(unused)
 
     return proto

@@ -47,7 +47,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from app.services.gi_updater.api.client import HttpClient
 from app.services.gi_updater.common.logging import get_logger
@@ -123,11 +123,12 @@ class SophonPatchAsset:
         """该补丁资产是否需要从网络下载数据。
 
         Returns:
-            ``True`` 表示 DownloadOver / Patch（需要下载）；
-            CopyOver / Remove 返回 ``False``。
+            ``True`` 表示 CopyOver / Patch / DownloadOver——三者的字节都来自差分档案
+            或目标资源；只有 Remove 不需要。
         """
         return self.patch_method in (
             SophonPatchMethod.DownloadOver,
+            SophonPatchMethod.CopyOver,
             SophonPatchMethod.Patch,
         )
 
@@ -141,18 +142,23 @@ def build_patch_assets(
     client: HttpClient,
     patch_pair: SophonChunkManifestInfoPair,
     target_pair: SophonChunkManifestInfoPair,
+    version_update_from: str,
     *,
     logger: Any = None,
 ) -> Tuple[List[SophonPatchAsset], List[str]]:
     """把目标清单与差分清单合并成补丁资产列表。
 
-    对目标版本主清单里的每个 asset，结合 patch 清单判定其补丁方式
-    （DownloadOver / CopyOver / Patch），并收集需要删除的旧文件。
+    以差分清单点名的文件为准：每个文件按本机基线挑出对应分片，分片带
+    ``original_file_name`` 的走 hdiff 打补丁（Patch），不带的说明分片本身就是新内容
+    （CopyOver）；差分清单没点名的目标文件不动。同时收集需要删除的旧文件。
 
     Args:
         client: HTTP 客户端。
         patch_pair: 差分分支清单/分片信息对。
         target_pair: 目标版本主清单信息对。
+        version_update_from: 本机已装的基线版本串（3 段，如 ``7.0.0``）——
+            差分清单为**每个**基线都存了一份 ``asset_info``，必须按它挑，
+            拿错基线的分片会把别的版本的分片当成本次要下的量。
         logger: 可选日志器。
 
     Returns:
@@ -163,38 +169,30 @@ def build_patch_assets(
     target_assets = SophonManifest.enumerate_assets(client, target_pair, logger=logger)
     patch_proto = _fetch_patch_proto(client, patch_pair, logger=logger)
 
-    # asset_name -> (asset_property, 选定版本的 asset_info)
+    # asset_name -> 本机基线对应的那份 asset_info
     patch_dict: Dict[str, Any] = {}
     for asset_property in patch_proto.patch_assets:
-        info = _pick_asset_info(asset_property)
+        info = _pick_asset_info(asset_property, version_update_from)
         if info is None:
             continue
-        patch_dict[asset_property.asset_name] = (asset_property, info)
+        patch_dict[asset_property.asset_name] = info
 
     results: List[SophonPatchAsset] = []
-    for asset in target_assets:
-        if asset.is_directory:
+    target_index = {
+        asset.asset_name: asset for asset in target_assets if not asset.is_directory
+    }
+    # 只处理差分清单点名、且带本机基线分片的文件。目标清单里其余文件本机已有且内容
+    # 一致，不在这次更新范围内——把它们当成「整文件重下」会把一次约 10 GB 的增量
+    # 变成上百 GB 的全量下载。
+    for name, info in patch_dict.items():
+        asset = target_index.get(name)
+        if asset is None:
+            logger.debug("差分清单里的 %s 不在目标清单中，跳过", name)
             continue
 
-        entry = patch_dict.get(asset.asset_name or "")
-        if entry is None:
-            # 目标清单里有、patch 里没有 -> 整文件下载
-            results.append(
-                SophonPatchAsset(
-                    main_asset=asset,
-                    patch_method=SophonPatchMethod.DownloadOver,
-                    target_file_path=asset.asset_name,
-                    target_file_size=asset.asset_size,
-                    target_file_hash=asset.asset_hash,
-                    matching_field=asset.matching_field,
-                )
-            )
-            continue
-
-        _, info = entry
         chunk = info.chunks[0] if info.chunks else None
         if chunk is None or not chunk.original_file_name:
-            # patch chunk 本身就是新内容
+            # patch chunk 本身就是新内容：整份新文件从差分档案里取
             results.append(
                 SophonPatchAsset(
                     main_asset=asset,
@@ -231,11 +229,8 @@ def build_patch_assets(
             )
         )
 
-    # unused_assets -> Remove
-    removed: List[str] = []
-    for asset_property in getattr(patch_proto, "patch_assets", []):
-        pass
-    removed.extend(_collect_unused_assets(patch_proto))
+    # unused_assets -> 待删除的旧文件（目标清单里还在用的必须留下）
+    removed = _collect_unused_assets(patch_proto, set(target_index))
 
     return results, removed
 
@@ -273,47 +268,48 @@ def _fetch_patch_proto(
     return parse_sophon_patch(raw)
 
 
-def _pick_asset_info(asset_property) -> Any:
-    """从 asset 的多个 asset_info 中选一个用于打补丁。
+def _pick_asset_info(asset_property, version_update_from: str) -> Any:
+    """从 asset 的多个 asset_info 里挑出本机基线对应的那一份。
 
-    服务端按 ``versionUpdateFrom`` 精确匹配；这里优先取第一个有 chunk 的条目，
-    若条目带 version_tag 则由调用方通过 ``preferred_version`` 过滤。
+    差分清单会把**每个可升级基线**的分片都塞进同一个 asset 条目（``asset_infos``
+    里各一份，带 ``version_tag``）。服务端也是按 ``versionUpdateFrom`` 精确匹配，
+    所以这里只认版本 tag 相同的条目：tag 对不上就返回 ``None``，
+    让该文件走上层的全量下载分支，而不是拿别的基线的分片来打补丁。
 
     Args:
         asset_property: 差分清单里的一个 asset 属性对象，含 ``asset_infos`` 列表。
+        version_update_from: 本机基线版本串（3 段，如 ``7.0.0``），比较忽略大小写。
 
     Returns:
-        选中的 asset_info（:class:`SophonPatchAssetInfo`）；
-        全部为空时返回 ``None``。
+        该基线对应的 asset_info（:class:`SophonPatchAssetInfo`）；没有则 ``None``。
     """
+    wanted = version_update_from.lower()
     for info in asset_property.asset_infos:
-        if info.chunks:
+        if info.version_tag.lower() == wanted:
             return info
-    return asset_property.asset_infos[0] if asset_property.asset_infos else None
+    return None
 
 
-def _collect_unused_assets(patch_proto) -> List[str]:
-    """收集需要删除的旧文件（/ ``SophonUnusedAssetProperty``）。
+def _collect_unused_assets(patch_proto, keep_names: Set[str]) -> List[str]:
+    """收集新版本不再引用的旧文件（``SophonUnusedAssetProperty``）。
 
     Args:
         patch_proto: 已解析的差分清单协议对象，含 ``unused_assets``。
+        keep_names: 目标清单里仍然存在的文件名；命中的一律不删。
 
     Returns:
-        待删除的相对文件路径列表。
+        待删除的相对文件路径列表（已去重、保持首次出现顺序）。
     """
     names: List[str] = []
-    for unused_property in getattr(patch_proto, "unused_assets", []) or []:
-        if isinstance(unused_property, str):
-            names.append(unused_property)
-            continue
-        # SophonUnusedAssetProperty 里真正的文件名在 asset_infos[].files[]
-        for info in getattr(unused_property, "asset_infos", []) or []:
-            for file_entry in getattr(info, "files", []) or []:
-                name = getattr(file_entry, "file_name", None) or getattr(
-                    file_entry, "name", None
-                )
-                if name:
-                    names.append(name)
+    seen: Set[str] = set()
+    for unused_property in patch_proto.unused_assets:
+        for info in unused_property.asset_infos:
+            for file_entry in info.assets:
+                name = file_entry.file_name
+                if not name or name in keep_names or name in seen:
+                    continue
+                seen.add(name)
+                names.append(name)
     return names
 
 

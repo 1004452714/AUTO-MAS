@@ -23,7 +23,8 @@ launcher_id / game_id / biz 三元组：
 
     资源包   /hyp/hyp-connect/api/getGamePackages
     分支     /hyp/hyp-connect/api/getGameBranches
-    构建     /downloader/sophon_chunk/api/getBuild
+    构建     /downloader/sophon_chunk/api/getBuild        （全量清单，只收 GET）
+    差分     /downloader/sophon_chunk/api/getPatchBuild   （差分清单，只收 POST）
 """
 
 from __future__ import annotations
@@ -196,7 +197,7 @@ class PresetConfig:
         password: str = "",
         tag: str = "",
     ) -> str:
-        """拼 ``getBuild`` URL（模板）。
+        """拼 ``getBuild`` URL（主清单与预下载清单）。
 
         Args:
             package_id: 分支接口返回的 ``package_id``，拼进 ``package_id`` 参数。
@@ -211,15 +212,45 @@ class PresetConfig:
             ``tag`` 必须传 API 返回的原始 3 段版本串（如 ``7.0.0``）；
             ``tag`` 为空时该参数整体被省略。若补成 4 段版本号，服务端会以 ``-202`` 拒绝。
         """
+        return self.build_sophon_query_url(
+            f"{self.downloader_base}/downloader/sophon_chunk/api/getBuild",
+            package_id=package_id,
+            branch=branch,
+            password=password,
+            tag=tag,
+        )
+
+    def build_sophon_query_url(
+        self,
+        base_url: str,
+        package_id: str,
+        branch: str = "main",
+        password: str = "",
+        tag: str = "",
+    ) -> str:
+        """给任意 Sophon ``getBuild`` 系端点拼上同一套查询参数。
+
+        主清单（``getBuild``）与差分清单（``getPatchBuild``）的查询串形状完全一样，
+        差别只在端点路径与 HTTP 方法，所以拼接只留这一份。
+
+        Args:
+            base_url: 端点地址，取自预设 :class:`SophonChunkUrls`。
+            package_id: 分支接口返回的 ``package_id``。
+            branch: 分支名。
+            password: 分支密码（可空）。
+            tag: 版本 tag（可空，空时整体省略该参数）。
+
+        Returns:
+            带 ``plat_app`` 等业务参数的完整请求地址。
+        """
         url = (
-            f"{self.downloader_base}/downloader/sophon_chunk/api/getBuild"
+            f"{base_url}"
             f"?plat_app={self.launcher_biz_name}"
             f"&branch={branch}"
             f"&password={password}"
             f"&package_id={package_id}"
         )
         if tag:
-            # 差分请求在 URL 上追加 `&tag=<version>`，服务端据此挑基线版本
             url += f"&tag={tag}"
         return url
 
@@ -269,21 +300,23 @@ _COMMON_LOCALES = ("zh-cn", "en-us", "ja-jp", "ko-kr")
 def _sophon_urls(base: str) -> SophonChunkUrls:
     """构造本区服的 Sophon 下载 URL 组。
 
-    branch/main/preload/patch 通常指向同一 ``getBuild`` 端点，
-    这里一并复用，``main_branch_matching_field`` 固定为 ``"game"``。
+    branch/main/preload 都走 ``getBuild``（只收 GET），**差分走独立的
+    ``getPatchBuild`` 端点（只收 POST）**；两个端点互不通用，拿 GET 去问 getPatchBuild
+    或拿 POST 去问 getBuild，服务端都回 405。
+    这里只按区服把两个端点摆好，``main_branch_matching_field`` 固定为 ``"game"``。
 
     Args:
         base: 下载域名（``downloader_base``）。
 
     Returns:
-        四个端点都指向 ``{base}/downloader/sophon_chunk/api/getBuild`` 的 ``SophonChunkUrls``。
+        含全量与差分两个端点的 ``SophonChunkUrls``。
     """
     get_build = f"{base}/downloader/sophon_chunk/api/getBuild"
     return SophonChunkUrls(
-        branch_url=f"{get_build}",
+        branch_url=get_build,
         main_url=get_build,
         preload_url=get_build,
-        patch_url=get_build,
+        patch_url=f"{base}/downloader/sophon_chunk/api/getPatchBuild",
         main_branch_matching_field="game",
     )
 

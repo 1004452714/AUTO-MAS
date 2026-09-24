@@ -339,18 +339,19 @@ class SophonManifest:
         *,
         logger: Any = None,
     ) -> SophonChunkManifestInfoPair:
-        """拉差分 ``getBuild`` 并组装成清单信息对。
+        """拉差分 ``getPatchBuild`` 并组装成清单信息对。
 
         与 :meth:`create_info_pair` 的三点差异：
 
-        1. HTTP 方法是 **POST**（````）；
+        1. 端点是 ``getPatchBuild``（不是 ``getBuild``），且只收 **POST**；
         2. 清单条目类型是 ``SophonManifestPatchIdentity``，
-           chunk 信息来自 ``diff_download`` + ``diff_tagged_info[version_update_from]``；
+           chunk 信息来自 ``diff_download`` + ``stats``（重建为
+           ``diff_tagged_info``，键是基线版本）；
         3. 拿不到 ``DiffTaggedInfo`` 就认为「没有可用的差分」→ ``is_found=False``。
 
         Args:
             client: HTTP 客户端。
-            url: patch 分支 getBuild 请求地址（用 POST）。
+            url: patch 分支 ``getPatchBuild`` 请求地址（用 POST）。
             version_update_from: 起始版本号，用于取 ``diff_tagged_info``。
             matching_field: 清单类别；默认 ``game``。
             logger: 可选日志器。
