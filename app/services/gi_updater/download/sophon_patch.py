@@ -56,6 +56,7 @@ from app.services.gi_updater.download.protobuf import parse_sophon_patch
 from app.services.gi_updater.download.sophon import (
     SophonAsset,
     SophonChunkManifestInfoPair,
+    SophonChunksInfo,
     SophonDownloader,
     SophonManifest,
     _BytesStream,
@@ -99,6 +100,9 @@ class SophonPatchAsset:
 
     #: 目标版本主清单里的 asset（含完整 chunk 列表）
     main_asset: Optional[SophonAsset] = None
+    #: 差分档案的 chunk 信息（基址与是否压缩）——取 patch 分片只能用它，
+    #: 主包 chunk 目录里没有这些分片；``DownloadOver`` 不需要，留 ``None``
+    patch_chunks_info: Optional[SophonChunksInfo] = None
     patch_method: SophonPatchMethod = SophonPatchMethod.DownloadOver
 
     target_file_path: str = ""
@@ -196,6 +200,7 @@ def build_patch_assets(
             results.append(
                 SophonPatchAsset(
                     main_asset=asset,
+                    patch_chunks_info=patch_pair.chunks_info,
                     patch_method=SophonPatchMethod.CopyOver,
                     target_file_path=asset.asset_name,
                     target_file_size=asset.asset_size,
@@ -213,6 +218,7 @@ def build_patch_assets(
         results.append(
             SophonPatchAsset(
                 main_asset=asset,
+                patch_chunks_info=patch_pair.chunks_info,
                 patch_method=SophonPatchMethod.Patch,
                 target_file_path=asset.asset_name,
                 target_file_size=asset.asset_size,
@@ -645,28 +651,50 @@ class SophonPatcher:
             该 asset 的 patch 数据原始字节。
 
         Raises:
-            RuntimeError: 缺失 chunk 信息，或解压后 MD5 与清单不符时。
+            RuntimeError: 缺差分档案 chunk 信息、取回长度与清单不符，
+                或整档下载时 MD5 与清单不符。
         """
-        chunks_info = asset.main_asset.chunks_info if asset.main_asset else None
+        # 基址只能取差分档案那份：主包 chunk 目录里没有 patch 分片，
+        # 拿主包基址去拼会 404
+        chunks_info = asset.patch_chunks_info
         if chunks_info is None:
-            raise RuntimeError(f"缺少 chunk 信息：{asset.target_file_path}")
+            raise RuntimeError(f"缺少差分档案 chunk 信息：{asset.target_file_path}")
 
         url = chunks_info.chunk_url(asset.patch_name_source)
         start = asset.patch_offset
-        end = start + asset.patch_chunk_length - 1 if asset.patch_chunk_length else None
+        length = asset.patch_chunk_length
 
-        if end is not None and end >= start:
-            response = self.client.range_get(url, start, end)
-            try:
-                data = response.content
-            finally:
-                response.close()
+        if length:
+            response = self.client.range_get(url, start, start + length - 1)
         else:
             response = self.client.get(url, stream=True)
-            try:
-                data = response.content
-            finally:
-                response.close()
+        try:
+            data = response.content
+        finally:
+            response.close()
+
+        # ``patch_hash`` / ``patch_size`` 描述的是**整份差分档案**：多个 asset 共用
+        # 同一档案、各取自己的 offset+length 段，所以按段取数时不能拿整档 MD5 来比
+        # （必然不符），只能比段长度；只有整档下载时才校验 MD5。
+        # 目标文件本身的完整性由打补丁后的 ``target_file_hash`` 兜底。
+        if length:
+            if len(data) != length:
+                raise RuntimeError(
+                    f"patch 分段长度不符：{asset.patch_name_source} "
+                    f"期望 {length} 实际 {len(data)}"
+                )
+        elif asset.patch_hash and len(data) != asset.patch_size:
+            raise RuntimeError(
+                f"差分档案大小不符：{asset.patch_name_source} "
+                f"期望 {asset.patch_size} 实际 {len(data)}"
+            )
+        elif asset.patch_hash:
+            actual = hashlib.md5(data).hexdigest()
+            if actual.lower() != asset.patch_hash.lower():
+                raise RuntimeError(
+                    f"差分档案 {asset.patch_name_source} MD5 不符"
+                    f"（期望 {asset.patch_hash}，实际 {actual}）"
+                )
 
         if chunks_info.is_use_compression:
             data = decompress(data)
@@ -674,13 +702,6 @@ class SophonPatcher:
         if self.speed_limiter:
             self.speed_limiter.consume(len(data))
 
-        if asset.patch_hash:
-            actual = hashlib.md5(data).hexdigest()
-            if actual.lower() != asset.patch_hash.lower():
-                raise RuntimeError(
-                    f"patch chunk {asset.patch_name_source} MD5 不符"
-                    f"（期望 {asset.patch_hash}，实际 {actual}）"
-                )
         return data
 
     def _is_target_complete(self, target: str, asset: SophonPatchAsset) -> bool:
