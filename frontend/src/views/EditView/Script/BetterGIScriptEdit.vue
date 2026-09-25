@@ -150,12 +150,6 @@
               </a-form-item>
             </a-col>
           </a-row>
-
-          <GameUpdateFields
-            :model="bettergiConfig.Game"
-            with-exe
-            @field-change="(key, value) => handleChange('Game', key, value)"
-          />
         </div>
 
         <div class="form-section">
@@ -224,6 +218,33 @@
               </a-form-item>
             </a-col>
           </a-row>
+          <a-row :gutter="24">
+            <a-col :span="8">
+              <a-form-item>
+                <template #label>
+                  <span class="form-label">
+                    {{ t('edit.bettergiAccountSwitchMethod') }}
+                    <a-tooltip :title="t('edit.bettergiAccountSwitchMethodHint')">
+                      <QuestionCircleOutlined class="help-icon" />
+                    </a-tooltip>
+                  </span>
+                </template>
+                <a-select
+                  v-model:value="bettergiConfig.Run.AccountSwitchMethod"
+                  size="large"
+                  style="width: 100%"
+                  @change="handleAccountSwitchMethodChange"
+                >
+                  <a-select-option value="BGI">
+                    {{ t('edit.bettergiAccountSwitchMethodBgi') }}
+                  </a-select-option>
+                  <a-select-option value="MAS">
+                    {{ t('edit.bettergiAccountSwitchMethodMas') }}
+                  </a-select-option>
+                </a-select>
+              </a-form-item>
+            </a-col>
+          </a-row>
         </div>
       </a-form>
     </a-card>
@@ -233,7 +254,6 @@
 <script setup lang="ts">
 import ConfigLockPanel from '@/components/ConfigLockPanel.vue'
 import DocLink from '@/components/DocLink.vue'
-import GameUpdateFields from './components/GameUpdateFields.vue'
 import { MAS_DOC_URLS } from '@/utils/openExternal'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -272,14 +292,12 @@ interface BetterGIRunForm {
   RunTimesLimit: number
   RunTimeLimit: number
   UseAdmin: boolean
+  AccountSwitchMethod: 'BGI' | 'MAS'
 }
 
 interface BetterGIGameForm {
   Controller: string
   CloseOnFinish: boolean
-  IfAutoUpdate: boolean
-  UpdateExe: string
-  UpdateTimeLimit: number
 }
 
 interface BetterGIScriptConfigForm {
@@ -300,14 +318,14 @@ const formData = reactive({
 
 const bettergiConfig = reactive<BetterGIScriptConfigForm>({
   Info: { Name: '', RootPath: '.' },
-  Run: { ProxyTimesLimit: 0, RunTimesLimit: 3, RunTimeLimit: 10, UseAdmin: true },
-  Game: {
-    Controller: '电脑端-前台',
-    CloseOnFinish: true,
-    IfAutoUpdate: false,
-    UpdateExe: '',
-    UpdateTimeLimit: 180,
+  Run: {
+    ProxyTimesLimit: 0,
+    RunTimesLimit: 3,
+    RunTimeLimit: 10,
+    UseAdmin: true,
+    AccountSwitchMethod: 'MAS',
   },
+  Game: { Controller: '电脑端-前台', CloseOnFinish: true },
 })
 
 const rules = computed(() => ({
@@ -331,6 +349,12 @@ const handleChange = async (category: string, key: string, value: unknown) => {
       logger.error(msg)
     }
   }, `${category}.${key}`)
+}
+
+const handleAccountSwitchMethodChange = async (
+  value: BetterGIScriptConfigForm['Run']['AccountSwitchMethod']
+) => {
+  await handleChange('Run', 'AccountSwitchMethod', value)
 }
 
 const applyRootPathDefaults = async (rootPath: string) => {

@@ -101,7 +101,11 @@ from app.models.config import (
     read_maa_config,
 )
 from app.models.schema import PlanComboxConsumer
-from app.task.M9A.migration import migrate_legacy_m9a_scripts
+from app.task.M9A.migration import (
+    migrate_legacy_m9a_scripts,
+    normalize_m9a_managed_entries,
+    repair_m9a_migration_losses,
+)
 from app.utils import get_logger, is_supervised, resource_path
 from app.utils.community import next_community_account_name
 from app.utils.constants import (
@@ -112,6 +116,7 @@ from app.utils.constants import (
     TYPE_BOOK,
     UTC4,
     UTC8,
+    game_now,
 )
 from app.utils.io import ConfigCorruptedError, force_rmtree, write_file
 from app.utils.paths import SOURCE_ROOT
@@ -457,6 +462,16 @@ class AppConfig(GlobalConfig):
             self.config_path / "ScriptConfig.json",
             global_mirror_cdk=str(self.get("Update", "MirrorChyanCDK") or ""),
         )
+        # 按 v5.6.0-beta.1 迁过的配置，从迁移备份补回那版清空的输入值与丢掉的切号，只做一次
+        m9a_repair = await asyncio.to_thread(
+            repair_m9a_migration_losses,
+            self.config_path / "ScriptConfig.json",
+            skip_uids=set(m9a_migration.migrated_uids),
+        )
+        # 启动游戏 / 切换账号 / 关闭游戏由 MAS 控制，不留在用户队列里：每次启动整理一遍，幂等
+        m9a_managed = await asyncio.to_thread(
+            normalize_m9a_managed_entries, self.config_path / "ScriptConfig.json"
+        )
         # HSR 旧直控快照（Direct.*）已删字段，同理必须在 connect 之前另存原始密文
         await self._archive_legacy_hsr_direct_snapshots(
             self.config_path / "ScriptConfig.json"
@@ -464,6 +479,10 @@ class AppConfig(GlobalConfig):
         await self.ScriptConfig.connect(self.config_path / "ScriptConfig.json")
         if m9a_migration.changed or m9a_migration.failure:
             await self._settle_m9a_migration(m9a_migration)
+        if m9a_repair.needs_notice:
+            self.startup_notices.append(m9a_repair.notice())
+        if m9a_managed.needs_notice:
+            self.startup_notices.append(m9a_managed.notice())
         await self.QueueConfig.connect(self.config_path / "QueueConfig.json")
         await self.ToolsConfig.connect(self.config_path / "ToolsConfig.json")
 
@@ -2995,8 +3014,14 @@ class AppConfig(GlobalConfig):
             and isinstance(task_data, dict)
             and "TaskSnapshot" in task_data
         ):
+            from app.task.MaaFW.tools.embedded.flavor import sanitize_user_task_update
             from app.task.MaaFW.tools.embedded.option_secrets import (
                 seal_user_task_snapshot,
+            )
+
+            # 特调收归自己管的任务（如 M9A 的启动 / 切号 / 关闭）不进用户队列，写入前按特调整理
+            await asyncio.to_thread(
+                sanitize_user_task_update, script_id, script_config, user_config, data
             )
 
             task_data["TaskSnapshot"] = await asyncio.to_thread(
@@ -3677,6 +3702,9 @@ class AppConfig(GlobalConfig):
             maa_data_dir=archive_dir,
             config_path=self.config_path,
             proxy=self.proxy,
+            today=game_now(
+                script_config.UserData[uuid.UUID(user_id)].get("Info", "Server")
+            ).date(),
             skland=skland,
         )
         # 目标干员当前练度（编辑器"当前等级 → 目标等级"展示用）；
@@ -4430,11 +4458,13 @@ class AppConfig(GlobalConfig):
         """获取关卡信息"""
 
         stage_by_server = await self.get_stage(refresh=refresh)
+        # 开放日按区服的游戏日判断
+        game_today = game_now(server)
         server = "Official" if server == "Bilibili" else server
         stage_data = stage_by_server.get(server, {})
 
         if type == "Info":
-            today = datetime.now(tz=UTC4).isoweekday()
+            today = game_today.isoweekday()
             res_stage_info = []
             for stage in RESOURCE_STAGE_INFO:
                 if (
@@ -4460,7 +4490,7 @@ class AppConfig(GlobalConfig):
                 )
             return data
         elif type == "Today":
-            return stage_data.get(datetime.now(tz=UTC4).strftime("%A"), [])
+            return stage_data.get(game_today.strftime("%A"), [])
         else:
             return stage_data.get(type, [])
 
@@ -5443,14 +5473,7 @@ class AppConfig(GlobalConfig):
             lines.append(f"迁移前的配置已备份为 {report.backup_path.name}")
         self.startup_notices.append(
             {
-                "level": "warning"
-                if (
-                    report.failure
-                    or report.disabled_users
-                    or report.dropped_tasks
-                    or report.degraded_scripts
-                )
-                else "info",
+                "level": "warning" if report.needs_attention else "info",
                 "title": "M9A 脚本迁移失败"
                 if report.failure
                 else "M9A 脚本已并入 MFW 引擎"
