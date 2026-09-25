@@ -26,6 +26,7 @@ maafw>=5.12,<6.0
 mss==9.0.2
 fastapi-mcp==0.4.0
 json5==0.14.0
+protobuf==7.36.1
 PyYAML==6.0.3
 sentry-sdk==2.66.1
 tomli_w==1.2.0
