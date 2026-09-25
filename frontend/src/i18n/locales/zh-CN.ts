@@ -1682,6 +1682,9 @@ export default {
     bettergiControllerCloud: '电脑端-云原神（暂未开发）',
     bettergiControllerDesktopClone: '电脑端-桌面分身（暂未开发）',
     bettergiCloseGameOnFinish: '任务结束后关闭游戏',
+    bettergiGenshinUpdate: '启动前更新原神客户端',
+    bettergiGenshinUpdateHint:
+      '任务启动游戏前，由 MAS 检查并应用官方增量包，不必再开官方启动器；拿不到差分包（全新安装或需逐文件全量比对）时会停止并提示改用官方启动器。B服请用官方启动器更新',
     bettergiCloseGameOnFinishHint: '任务执行完毕后是否关闭游戏',
     bettergiRetryLimitHint: '超过该次数仍失败则终止',
     bettergiRunTimeoutHint: '日志长期无变化将判定超时',

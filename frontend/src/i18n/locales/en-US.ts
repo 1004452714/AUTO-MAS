@@ -1755,6 +1755,9 @@ export default {
     bettergiControllerCloud: 'PC - Cloud Genshin (not implemented)',
     bettergiControllerDesktopClone: 'PC - desktop clone (not implemented)',
     bettergiCloseGameOnFinish: 'Close the game when the task finishes',
+    bettergiGenshinUpdate: 'Update Genshin client before launch',
+    bettergiGenshinUpdateHint:
+      'Before the task launches the game, MAS checks and applies the official incremental patch, so the official launcher is not needed. When no patch is available (fresh install or full per-file comparison) it stops and asks you to use the official launcher. Bilibili server: please use the official launcher',
     bettergiCloseGameOnFinishHint: 'Whether to close the game once the task has finished running',
     bettergiRetryLimitHint: 'Give up once this many attempts have failed',
     bettergiRunTimeoutHint: 'Treated as a timeout when the log stops changing for this long',
