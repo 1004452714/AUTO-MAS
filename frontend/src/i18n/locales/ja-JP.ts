@@ -1671,6 +1671,9 @@ export default {
     bettergiControllerCloud: 'PC - クラウド原神（未実装）',
     bettergiControllerDesktopClone: 'PC - デスクトップ分身（未実装）',
     bettergiCloseGameOnFinish: 'タスク終了後にゲームを終了する',
+    bettergiGenshinUpdate: '起動前に原神クライアントを更新',
+    bettergiGenshinUpdateHint:
+      'タスクがゲームを起動する前に、MAS が公式の増分パッチを確認・適用します（公式ランチャーは不要）。パッチが無い場合（新規インストール／ファイル単位の全量比較）は停止し、公式ランチャーでの更新を促します。Bサーバーは公式ランチャーをご利用ください',
     bettergiCloseGameOnFinishHint: 'タスクの実行が終わったときにゲームを終了するかどうか',
     bettergiRetryLimitHint: 'この回数を超えても失敗する場合は中止します',
     bettergiRunTimeoutHint: 'ログが長時間更新されない場合はタイムアウトと判定します',

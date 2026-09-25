@@ -4268,6 +4268,12 @@ class BetterGIConfig(ConfigBase):
         self.Game_CloseOnFinish = ConfigItem(
             "Game", "CloseOnFinish", True, BoolValidator()
         )
+        ## 启动游戏前由 MAS 检查并按需做原神客户端更新（只应用官方增量包；拿不到
+        ## 差分则停手并提示改用官方启动器）。游戏路径与客户端渠道取自 BetterGI
+        ## 全局配置或用户级 Switch.GamePath，本项不额外要求用户配置路径。
+        self.Game_IfAutoUpdate = ConfigItem(
+            "Game", "IfAutoUpdate", False, BoolValidator()
+        )
 
         self.UserData = MultipleConfig([BetterGIUserConfig])
 
