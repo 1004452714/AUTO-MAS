@@ -1,0 +1,169 @@
+#   AUTO-MAS: A Multi-Script, Multi-Config Management and Automation Software
+#   Copyright © 2025-2026 AUTO-MAS Team
+#
+#   This file is part of AUTO-MAS.
+#
+#   AUTO-MAS is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU Affero General Public License as
+#   published by the Free Software Foundation, either version 3 of
+#   the License, or (at your option) any later version.
+#
+#   AUTO-MAS is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#   Affero General Public License for more details.
+#
+#   You should have received a copy of the GNU Affero General Public License
+#   along with AUTO-MAS. If not, see <https://www.gnu.org/licenses/>.
+
+"""BetterGI 启动前的原神客户端更新。
+
+原神客户端由 BetterGI 自己启停，MAS 这边只经 ``game_info`` 拿到生效的游戏程序
+路径（用户级 ``Switch.GamePath`` 优先，否则透传 BGI 全局配置），**不读 BGI 的其他
+私有状态**。
+
+本文件只做「读配置 → 判渠道 → 推调度台 → 决定是否继续任务」，查版本、下载、打补丁
+与落盘都在 :mod:`app.services.genshin_updater`。行为策略：
+
+- **只自动应用增量包**；拿不到差分（全新安装、逐文件全量比对）就**停手并明确指出**，
+  建议用户用官方启动器——无人值守的任务不该顺手吃掉几十 GB；
+- **查不到就放行**：接口不可用或读不出渠道属于「无法判定」，旧客户端通常仍能登录，
+  不该因为查不到版本就拦住用户；
+- **需要更新却更新失败则阻断**：拿旧客户端撞登录只会白跑一轮；
+- **B 服硬拒绝**：B 服是独立渠道、版本节奏与官服不同，用官服清单更新会写坏客户端。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+
+from app.models.config import BetterGIConfig, BetterGIUserConfig
+from app.services.genshin_updater import (
+    KIND_LABELS,
+    UpdateKind,
+    execute_plan,
+    plan_update,
+)
+from app.task.BetterGI.tools import game_info
+from app.utils import get_logger
+from app.utils.hpatchz import ensure_hpatchz
+
+logger = get_logger("原神更新 BetterGI")
+
+#: 一行面向用户的进度文案
+LogHook = Callable[[str], Awaitable[None]]
+
+#: 客户端渠道 → 更新接口区服；不在表里的渠道不接管
+_CHANNEL_TO_REGION: dict[str, str] = {
+    game_info.CHANNEL_OFFICIAL: "cn",
+    game_info.CHANNEL_GLOBAL: "global",
+}
+
+#: 本地客户端进程名（与 BGI 侧口径一致）
+_LOCAL_PROCESS_NAMES: tuple[str, ...] = ("YuanShen.exe", "GenshinImpact.exe")
+
+
+async def _report(on_log: LogHook | None, line: str) -> None:
+    """记一行日志并推给调度台。
+
+    Args:
+        on_log: 进度回调；``None`` 时只记日志。
+        line: 面向用户的文案。
+    """
+    logger.info(line)
+    if on_log is not None:
+        await on_log(line)
+
+
+async def ensure_game_updated(
+    script_config: BetterGIConfig,
+    user_config: BetterGIUserConfig,
+    *,
+    on_log: LogHook | None = None,
+) -> bool:
+    """启动游戏前检查并按需做原神客户端增量更新。
+
+    Args:
+        script_config: BetterGI 脚本配置。
+        user_config: 当前用户配置（游戏路径可能被用户级覆盖）。
+        on_log: 一行进度文案的回调。
+
+    Returns:
+        是否可以继续本次任务。``False`` 表示需要用户先处理——要么本次只能全量更新
+        （已在调度台说明），要么更新确认需要却失败。
+    """
+    if not script_config.get("Game", "IfAutoUpdate"):
+        # 开关没开是常态，什么都不写
+        return True
+
+    root_path = Path(str(script_config.get("Info", "RootPath") or "."))
+    user_game_path = str(user_config.get("Switch", "GamePath") or "")
+    try:
+        game_exe = game_info.resolve_game_exe(root_path, user_game_path)
+    except Exception as error:  # noqa: BLE001
+        logger.warning("原神更新：解析游戏路径失败，本轮跳过 - {}", error)
+        return True
+
+    channel = game_info.detect_channel(game_exe)
+    if channel == game_info.CHANNEL_BILIBILI:
+        await _report(
+            on_log,
+            f"原神更新：{channel}客户端（{game_exe}）不在自动更新支持范围，请用官方启动器更新",
+        )
+        return True
+
+    region = _CHANNEL_TO_REGION.get(channel or "")
+    if region is None:
+        logger.warning("原神更新：未能识别客户端渠道（{}），本轮跳过", game_exe)
+        return True
+
+    running = game_info.find_running_game_exe(_LOCAL_PROCESS_NAMES)
+    if running is not None:
+        await _report(
+            on_log, f"原神更新：检测到游戏正在运行（{running}），跳过更新以免写坏文件"
+        )
+        return True
+
+    plan = await plan_update(game_exe.parent, region=region)
+
+    if plan.kind is UpdateKind.NOOP:
+        logger.info("原神客户端已是最新（{}）", plan.local_version)
+        return True
+    if plan.kind is UpdateKind.PRELOAD:
+        await _report(on_log, f"原神更新：{plan.message}")
+        return True
+    if plan.kind is UpdateKind.UNKNOWN:
+        logger.warning("原神更新：无法判定是否需要更新，本轮跳过 - {}", plan.message)
+        return True
+
+    if plan.kind is not UpdateKind.PATCH:
+        # 增量之外的种类必须明确指出，绝不静默执行全量
+        await _report(
+            on_log,
+            f"原神客户端需要{KIND_LABELS[plan.kind]}（{plan.local_version or '?'} -> "
+            f"{plan.remote_version or '?'}）：MAS 只自动应用增量包，"
+            "本次已停止，请用官方启动器更新",
+        )
+        return False
+
+    try:
+        hpatchz = await ensure_hpatchz(on_progress=on_log)
+    except Exception as error:  # noqa: BLE001
+        await _report(on_log, f"原神更新：获取增量补丁工具失败（{error}），已停止")
+        return False
+
+    await _report(on_log, f"原神客户端{plan.describe()}")
+    result = await execute_plan(plan, hpatchz=hpatchz, on_progress=on_log)
+
+    if result.success:
+        await _report(
+            on_log,
+            f"原神客户端更新完成 {plan.local_version or '?'} -> "
+            f"{result.version or plan.remote_version or '?'}"
+            + (f"，清理旧文件 {result.removed} 个" if result.removed else ""),
+        )
+        return True
+
+    await _report(on_log, f"原神客户端更新未完成：{result.message}")
+    return False
