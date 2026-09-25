@@ -44,7 +44,14 @@ Sophon；而「自己下载并打补丁」这个方案里，真正贵的是差�
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+import asyncio
+import hashlib
+import os
+import shutil
+import subprocess
+import time
+import uuid
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -422,6 +429,30 @@ class ManifestRef:
     chunk_compressed: bool
 
 
+#: 分片本身就是新内容，直接落盘
+METHOD_COPYOVER = "copyover"
+
+#: 分片是 ldiff 数据，要用 hpatchz 打到旧文件上
+METHOD_PATCH = "patch"
+
+
+@dataclass(frozen=True)
+class PatchAsset:
+    """一个待更新文件的差分处理信息。"""
+
+    name: str
+    target_size: int
+    target_md5: str
+    method: str
+    #: 差分分片所在的 blob 文件名；多个文件共用同一 blob
+    patch_name: str
+    #: 本文件那一段在 blob 里的位置，配合 Range 取回
+    patch_offset: int
+    patch_length: int
+    #: 打补丁前的旧文件相对路径；CopyOver 时为空
+    original_name: str = ""
+
+
 @dataclass(frozen=True)
 class PatchSummary:
     """一次增量更新的体量统计。"""
@@ -431,6 +462,8 @@ class PatchSummary:
     patch_count: int
     copyover_count: int
     removals: tuple[str, ...] = ()
+    #: 单个目标文件的最大体积，用于估算磁盘峰值
+    largest_target: int = 0
 
 
 @dataclass(frozen=True)
@@ -445,6 +478,10 @@ class GenshinPlan:
     remote_version: str
     patch: PatchSummary | None = None
     message: str = ""
+    #: 本次要处理的文件明细；``kind`` 不是 ``PATCH`` 时为空
+    assets: tuple[PatchAsset, ...] = ()
+    #: 差分分片的基址
+    diff_url_prefix: str = ""
 
     @property
     def is_incremental(self) -> bool:
@@ -880,14 +917,15 @@ def _pick_asset_info(asset_property: Any, baseline: str) -> Any | None:
     return None
 
 
-def summarize_patch(
+def build_patch_assets(
     patch_proto: Any, target_assets: Any, baseline: str
-) -> PatchSummary:
-    """统计一次增量的体量与动作构成。
+) -> tuple[tuple[PatchAsset, ...], tuple[str, ...]]:
+    """把差分清单与目标清单合并成待处理明细，并收集待删文件。
 
     以差分清单点名的文件为准：``original_file_name`` 为空的是 CopyOver（分片本身
     即新内容），非空的是 Patch（用 hpatchz 打到旧文件上）。目标清单里未被点名的
-    文件本机已有且内容一致，不参与本次更新。
+    文件本机已有且内容一致，不参与本次更新——把它们也算成「要下」的话，一次约
+    10 GB 的增量会变成上百 GB 的全量下载。
 
     Args:
         patch_proto: ``SophonPatchProto`` 消息。
@@ -895,41 +933,60 @@ def summarize_patch(
         baseline: 本机基线版本。
 
     Returns:
-        体量统计。
+        ``(待处理明细, 待删旧文件)`` 二元组。
     """
-    in_target = {str(asset.AssetName) for asset in target_assets.Assets}
-    file_count = 0
-    download_size = 0
-    patch_count = 0
-    copyover_count = 0
+    target_index = {str(asset.AssetName): asset for asset in target_assets.Assets}
+    assets: list[PatchAsset] = []
 
     for asset_property in patch_proto.PatchAssets:
         name = str(asset_property.AssetName)
-        if name not in in_target:
+        target = target_index.get(name)
+        if target is None:
             # 差分清单点名但目标清单里没有：文件被移除，交给 unused_assets 处理
             continue
         info = _pick_asset_info(asset_property, baseline)
         if info is None:
             continue
         chunk = info.Chunk
-        # 要下的长度是 PatchLength：PatchSize 是整个差分 blob 的大小，多个文件
-        # 共用同一 blob，按文件累加会重复计数（实测会把 10 GB 报成 85 GB）。
-        # CopyOver 时 PatchLength 就等于新文件的完整大小。
-        size = int(chunk.PatchLength or 0)
-        file_count += 1
-        download_size += size
-        if str(chunk.OriginalFileName):
-            patch_count += 1
-        else:
-            copyover_count += 1
+        original_name = str(chunk.OriginalFileName)
+        assets.append(
+            PatchAsset(
+                name=name,
+                target_size=int(target.AssetSize),
+                target_md5=str(target.AssetHashMd5),
+                method=METHOD_PATCH if original_name else METHOD_COPYOVER,
+                patch_name=str(chunk.PatchName),
+                # 要下的长度是 PatchLength：PatchSize 是整个 blob 的大小，
+                # 多个文件共用同一 blob，按文件累加会重复计数（实测把 10 GB 报成 85 GB）。
+                # CopyOver 时 PatchLength 就等于新文件的完整大小。
+                patch_offset=int(chunk.PatchOffset),
+                patch_length=int(chunk.PatchLength),
+                original_name=original_name,
+            )
+        )
 
-    removals = collect_removals(patch_proto, in_target)
+    return tuple(assets), collect_removals(patch_proto, set(target_index))
+
+
+def summarize_assets(
+    assets: Sequence[PatchAsset], removals: Sequence[str]
+) -> PatchSummary:
+    """把待处理明细压成体量统计。
+
+    Args:
+        assets: 待处理明细。
+        removals: 待删旧文件。
+
+    Returns:
+        体量统计。
+    """
     return PatchSummary(
-        file_count=file_count,
-        download_size=download_size,
-        patch_count=patch_count,
-        copyover_count=copyover_count,
-        removals=removals,
+        file_count=len(assets),
+        download_size=sum(asset.patch_length for asset in assets),
+        patch_count=sum(1 for asset in assets if asset.method == METHOD_PATCH),
+        copyover_count=sum(1 for asset in assets if asset.method == METHOD_COPYOVER),
+        removals=tuple(removals),
+        largest_target=max((asset.target_size for asset in assets), default=0),
     )
 
 
@@ -1058,7 +1115,7 @@ async def plan_update(
         target_bytes = await fetch_manifest_bytes(http, target_ref)
         patch_proto = parse_patch_manifest(patch_bytes)
         target_assets = parse_manifest_assets(target_bytes)
-        summary = summarize_patch(patch_proto, target_assets, local_version)
+        assets, removals = build_patch_assets(patch_proto, target_assets, local_version)
         return GenshinPlan(
             region=region,
             game_dir=game_dir,
@@ -1066,7 +1123,9 @@ async def plan_update(
             kind=UpdateKind.PATCH,
             local_version=local_version,
             remote_version=remote_version,
-            patch=summary,
+            patch=summarize_assets(assets, removals),
+            assets=assets,
+            diff_url_prefix=patch_ref.chunk_url_prefix,
         )
     except UpdaterError as error:
         logger.warning("原神更新计划失败: {}", error)
@@ -1082,3 +1141,562 @@ async def plan_update(
     finally:
         if owned:
             await http.aclose()
+
+
+# =====================================================================================
+# 编排：执行计划
+# =====================================================================================
+
+#: 一行面向用户的进度文案
+ProgressHook = Callable[[str], Awaitable[None]]
+
+#: 中止判定；为真时在文件边界收工
+AbortHook = Callable[[], bool]
+
+#: 同时处理的文件数；下载与打补丁都在这个上限内
+_WORKERS = 6
+
+#: 中间产物目录（建在游戏目录内，保证与目标同卷，替换才是原子改名）
+_TEMP_DIR_NAME = "_mas_update"
+
+#: 已完成文件的流水账，用于中断后接着更新
+_JOURNAL_NAME = "done.txt"
+
+#: 替换目标文件前额外要求的磁盘余量
+_DISK_MARGIN_BYTES = 2 * 1024**3
+
+#: 单次差分分片请求的超时（秒）
+_CHUNK_TIMEOUT = 120.0
+
+#: 进度行的最小间隔（秒）
+_PROGRESS_INTERVAL = 1.0
+
+_dir_locks: dict[str, asyncio.Lock] = {}
+
+
+class PathUnsafeError(RuntimeError):
+    """清单里的路径不可信。"""
+
+
+@dataclass(frozen=True)
+class InstallResult:
+    """一次增量执行的结论。"""
+
+    success: bool
+    message: str
+    version: str = ""
+    files_done: int = 0
+    files_total: int = 0
+    bytes_downloaded: int = 0
+    removed: int = 0
+    #: 被中止判定打断；已落盘的合法文件保留
+    aborted: bool = False
+
+
+def game_dir_lock(game_dir: Path) -> asyncio.Lock:
+    """取某个游戏目录的互斥锁。
+
+    同一个客户端可能被多个用户共用，两轮更新并行会互相破坏文件。
+
+    Args:
+        game_dir: 游戏安装目录。
+
+    Returns:
+        该目录对应的锁（进程内单例）。
+    """
+    key = str(game_dir.resolve()).casefold()
+    lock = _dir_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _dir_locks[key] = lock
+    return lock
+
+
+def safe_relative(name: str) -> Path:
+    """把清单里的相对路径转成可信路径。
+
+    清单内容完全来自网络，直接拼进文件系统会被路径穿越攻击：绝对路径、盘符、
+    ``..`` 分量或指向目录自身的写法都可能写到游戏目录之外。
+
+    Args:
+        name: 清单里的相对路径。
+
+    Returns:
+        校验通过的相对路径。
+
+    Raises:
+        PathUnsafeError: 路径非法时。
+    """
+    raw = str(name or "").strip().replace("\\", "/")
+    if not raw:
+        raise PathUnsafeError("清单条目缺少路径")
+    candidate = Path(raw)
+    if candidate.is_absolute() or candidate.drive or candidate.root:
+        raise PathUnsafeError(f"清单条目是绝对路径: {name!r}")
+    if not candidate.parts:
+        raise PathUnsafeError(f"清单条目指向目录自身: {name!r}")
+    if ".." in candidate.parts:
+        raise PathUnsafeError(f"清单条目含上跳分量: {name!r}")
+    return candidate
+
+
+def resolve_within(root: Path, name: str) -> Path:
+    """在 ``root`` 下解析清单路径，并复查结果没有逃出 ``root``。
+
+    Args:
+        root: 游戏安装目录。
+        name: 清单里的相对路径。
+
+    Returns:
+        解析后的绝对路径。
+
+    Raises:
+        PathUnsafeError: 解析结果逃出 ``root`` 时。
+    """
+    resolved = (root / safe_relative(name)).resolve()
+    if not resolved.is_relative_to(root.resolve()):
+        raise PathUnsafeError(f"清单条目逃出目标目录: {name!r}")
+    return resolved
+
+
+def _md5_file(path: Path) -> str:
+    """算文件 MD5。
+
+    Args:
+        path: 文件路径。
+
+    Returns:
+        32 位小写十六进制串。
+    """
+    digest = hashlib.md5()
+    with path.open("rb") as handle:
+        while block := handle.read(4 * 1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _run_hpatchz(exe: Path, old: Path, diff: Path, out: Path) -> None:
+    """调 ``hpatchz`` 把差分打到旧文件上，产出新文件。
+
+    Args:
+        exe: ``hpatchz`` 可执行文件。
+        old: 旧文件。
+        diff: 差分数据。
+        out: 产出的新文件。
+
+    Raises:
+        UpdaterError: 子进程返回非零时。
+    """
+    result = subprocess.run(
+        [str(exe), "-f", str(old), str(diff), str(out)],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise UpdaterError(f"hpatchz 失败（{result.returncode}）: {detail[-200:]}")
+
+
+async def _fetch_range(
+    client: httpx.AsyncClient, url: str, offset: int, length: int
+) -> bytes:
+    """按 Range 取一段差分数据。
+
+    差分分片不压缩，取回来的字节就是原样内容：Patch 是 ldiff 数据，CopyOver 是
+    完整的新文件。
+
+    Args:
+        client: 复用的 HTTP 客户端。
+        url: 分片地址。
+        offset: 段起点。
+        length: 段长度。
+
+    Returns:
+        取回的字节。
+
+    Raises:
+        UpdaterError: 网络失败或长度不符时。
+    """
+    headers = {"Range": f"bytes={offset}-{offset + length - 1}"}
+    try:
+        response = await client.get(url, headers=headers, timeout=_CHUNK_TIMEOUT)
+        response.raise_for_status()
+    except httpx.HTTPError as error:
+        raise UpdaterError(f"取差分分片失败 {url}: {error}") from error
+    data = response.content
+    if len(data) != length:
+        raise UpdaterError(f"差分分片长度不符 {url}: 期望 {length} 实际 {len(data)}")
+    return data
+
+
+def _journal_path(temp_dir: Path) -> Path:
+    """取流水账文件路径。"""
+    return temp_dir / _JOURNAL_NAME
+
+
+def _load_journal(temp_dir: Path) -> set[str]:
+    """读出已完成文件名单。"""
+    try:
+        text = _journal_path(temp_dir).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return set()
+    return {line.strip() for line in text.splitlines() if line.strip()}
+
+
+def _append_journal(temp_dir: Path, name: str) -> None:
+    """把一个已完成文件追加进流水账。"""
+    with _journal_path(temp_dir).open("a", encoding="utf-8") as handle:
+        handle.write(name + "\n")
+
+
+async def _apply_asset(
+    client: httpx.AsyncClient,
+    game_dir: Path,
+    temp_dir: Path,
+    asset: PatchAsset,
+    hpatchz: Path,
+    diff_url_prefix: str,
+) -> int:
+    """处理一个文件：取差分 → 校验 → 同卷原子替换。
+
+    Args:
+        client: 复用的 HTTP 客户端。
+        game_dir: 游戏安装目录。
+        temp_dir: 中间产物目录（存差分数据）。
+        asset: 待处理明细。
+        hpatchz: ``hpatchz`` 可执行文件路径。
+        diff_url_prefix: 差分分片基址。
+
+    Returns:
+        本次下载的字节数。
+
+    Raises:
+        UpdaterError: 取回或校验失败时。
+        PathUnsafeError: 路径不可信时。
+    """
+    target = resolve_within(game_dir, asset.name)
+    url = f"{diff_url_prefix.rstrip('/')}/{asset.patch_name}"
+    data = await _fetch_range(client, url, asset.patch_offset, asset.patch_length)
+
+    # 先落到同目录的临时名，校验通过再原子改名——中途失败不会留下半个目标文件
+    staging = target.with_name(f"{target.name}.mas-new")
+    await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+
+    if asset.method == METHOD_COPYOVER:
+        # 分片本身就是新内容
+        actual = await asyncio.to_thread(lambda: hashlib.md5(data).hexdigest())
+        if actual != asset.target_md5:
+            raise UpdaterError(f"CopyOver 内容校验失败: {asset.name}")
+        await asyncio.to_thread(staging.write_bytes, data)
+    else:
+        diff_path = temp_dir / f"{uuid.uuid4().hex}.diff"
+        await asyncio.to_thread(diff_path.write_bytes, data)
+        try:
+            old = resolve_within(game_dir, asset.original_name)
+            if not await asyncio.to_thread(old.is_file):
+                raise UpdaterError(f"打补丁所需的旧文件缺失: {asset.original_name}")
+            await asyncio.to_thread(_run_hpatchz, hpatchz, old, diff_path, staging)
+        finally:
+            diff_path.unlink(missing_ok=True)
+        actual = await asyncio.to_thread(_md5_file, staging)
+        if actual != asset.target_md5:
+            staging.unlink(missing_ok=True)
+            raise UpdaterError(f"补丁结果校验失败: {asset.name}")
+
+    os.replace(staging, target)
+    return len(data)
+
+
+def write_local_version(game_dir: Path, version: str) -> None:
+    """把新版本号写回 ``config.ini`` 的 ``[General]``。
+
+    只改 ``game_version`` 那一行，其余内容与原文件编码（含 BOM）、行尾原样保留。
+    行解析与读取一致：不用 ``configparser``，该文件含重复键与非常规写法。
+
+    版本号是「本轮已完成」的标记，只在全部文件落盘、旧文件清理完之后才写。
+
+    Args:
+        game_dir: 游戏安装目录。
+        version: 目标版本串。
+
+    Raises:
+        UpdaterError: ``config.ini`` 不存在、没有 ``game_version`` 或写回失败时。
+    """
+    ini_path = game_dir / "config.ini"
+    try:
+        raw_bytes = ini_path.read_bytes()
+    except OSError as error:
+        raise UpdaterError(f"读取 config.ini 失败: {ini_path} - {error}") from error
+
+    has_bom = raw_bytes.startswith(b"\xef\xbb\xbf")
+    text = raw_bytes.decode("utf-8-sig", errors="replace")
+    lines = text.splitlines(keepends=True)
+
+    in_general = False
+    replaced = False
+    for index, raw in enumerate(lines):
+        stripped = raw.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_general = stripped[1:-1].strip().casefold() == "general"
+            continue
+        if not in_general or replaced:
+            continue
+        key, sep, _ = stripped.partition("=")
+        if sep and key.strip().casefold() == "game_version":
+            ending = "\r\n" if raw.endswith("\r\n") else "\n"
+            lines[index] = f"game_version={version}{ending}"
+            replaced = True
+
+    if not replaced:
+        raise UpdaterError(f"config.ini 的 [General] 里没有 game_version: {ini_path}")
+
+    payload = ("\ufeff" if has_bom else "") + "".join(lines)
+    try:
+        ini_path.write_bytes(payload.encode("utf-8"))
+    except OSError as error:
+        raise UpdaterError(f"写回 config.ini 失败: {ini_path} - {error}") from error
+
+
+async def _remove_unused(game_dir: Path, removals: Iterable[str]) -> int:
+    """删除目标清单已不再使用的旧文件。
+
+    只删文件、不删目录：目录留空不影响客户端，误删目录的代价却大得多。
+
+    Args:
+        game_dir: 游戏安装目录。
+        removals: 待删相对路径。
+
+    Returns:
+        实际删掉的个数。
+    """
+    removed = 0
+    for name in removals:
+        target = resolve_within(game_dir, name)
+        try:
+            if target.is_file():
+                target.unlink()
+                removed += 1
+        except OSError as error:
+            logger.warning("删除旧文件失败 {}: {}", target, error)
+    return removed
+
+
+def _disk_has_room(game_dir: Path, needed: int) -> bool:
+    """目标盘余量是否够本次更新。
+
+    Args:
+        game_dir: 游戏安装目录。
+        needed: 本轮需要的字节数。
+
+    Returns:
+        余量足够时为真；读不出余量时按足够处理，不拦正常更新。
+    """
+    try:
+        free = shutil.disk_usage(game_dir).free
+    except OSError:
+        return True
+    return free >= needed + _DISK_MARGIN_BYTES
+
+
+async def execute_plan(
+    plan: GenshinPlan,
+    *,
+    hpatchz: Path,
+    on_progress: ProgressHook | None = None,
+    should_abort: AbortHook | None = None,
+    client: httpx.AsyncClient | None = None,
+    workers: int = _WORKERS,
+    timeout: float = 30.0,
+) -> InstallResult:
+    """执行一次增量更新。
+
+    只接受 ``kind=PATCH`` 的计划；其余种类一律拒绝，由调用方明确指出并建议改用
+    官方启动器。每个文件按「取差分 → 校验 → 同卷原子替换」推进，任何一步不符预期
+    即停手，**不写回版本号**——这样客户端仍认为自己是旧版，不会带病启动。
+
+    被中止判定打断时同样不写版本号，已替换的文件保持有效，重新运行会跳过它们
+    接着更新（进度记在游戏目录内的中间产物目录里，成功后自动清掉）。
+
+    Args:
+        plan: 由 :func:`plan_update` 得出的计划。
+        hpatchz: ``hpatchz`` 可执行文件路径（调用方用 ``ensure_hpatchz`` 取得）。
+        on_progress: 一行行进度文案的回调。
+        should_abort: 中止判定；为真时在文件边界收工。
+        client: 复用的 HTTP 客户端；``None`` 时临时新建一个。
+        workers: 同时处理的文件数。
+        timeout: 单次请求超时（秒）。
+
+    Returns:
+        :class:`InstallResult`。协议层异常转成失败结论，不抛给调用方。
+    """
+    if plan.kind is not UpdateKind.PATCH:
+        return InstallResult(
+            success=False,
+            message=f"本次是{KIND_LABELS[plan.kind]}，不自动执行，请用官方启动器更新",
+        )
+    summary = plan.patch
+    if summary is None or not plan.assets:
+        return InstallResult(success=False, message="计划里没有可执行的文件明细")
+
+    game_dir = plan.game_dir
+    total = len(plan.assets)
+
+    try:
+        resolved_targets = [
+            (asset, resolve_within(game_dir, asset.name)) for asset in plan.assets
+        ]
+        for asset, _ in resolved_targets:
+            if asset.method == METHOD_PATCH:
+                resolve_within(game_dir, asset.original_name)
+    except PathUnsafeError as error:
+        logger.warning("原神更新路径校验失败: {}", error)
+        return InstallResult(success=False, message=f"清单路径不可信：{error}")
+
+    needed = summary.download_size + summary.largest_target
+    if not _disk_has_room(game_dir, needed):
+        free = summarize_size(shutil.disk_usage(game_dir).free)
+        return InstallResult(
+            success=False,
+            message=(
+                f"磁盘剩余 {free}，本次增量需要同时放下差分包与更新后的文件"
+                f"（约 {summarize_size(needed)}），请先清理后再试"
+            ),
+        )
+
+    owned = client is None
+    http = client or httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+    temp_dir = game_dir / _TEMP_DIR_NAME
+    throttle = _Throttle(_PROGRESS_INTERVAL)
+    completed = 0
+    downloaded = 0
+
+    async with game_dir_lock(game_dir):
+        try:
+            await asyncio.to_thread(temp_dir.mkdir, parents=True, exist_ok=True)
+            done = _load_journal(temp_dir)
+            pending = [asset for asset in plan.assets if asset.name not in done]
+            completed = len(done)
+
+            if on_progress is not None:
+                skipped = f"，已跳过 {completed} 个" if completed else ""
+                await on_progress(
+                    f"开始增量更新：{total} 个文件，待下载 "
+                    f"{summarize_size(summary.download_size)}{skipped}"
+                )
+
+            size = max(1, workers)
+            for start in range(0, len(pending), size):
+                if should_abort is not None and should_abort():
+                    return InstallResult(
+                        success=False,
+                        aborted=True,
+                        message="更新已中止；已完成的部分保留，重新运行会接着更新",
+                        files_done=completed,
+                        files_total=total,
+                        bytes_downloaded=downloaded,
+                    )
+                batch = pending[start : start + size]
+                outcomes = await asyncio.gather(
+                    *(
+                        _apply_asset(
+                            http,
+                            game_dir,
+                            temp_dir,
+                            asset,
+                            hpatchz,
+                            plan.diff_url_prefix,
+                        )
+                        for asset in batch
+                    ),
+                    return_exceptions=True,
+                )
+                failures = [
+                    outcome
+                    for outcome in outcomes
+                    if isinstance(outcome, BaseException)
+                ]
+                if failures:
+                    raise failures[0]
+                for asset, outcome in zip(batch, outcomes):
+                    completed += 1
+                    downloaded += int(outcome)  # type: ignore[arg-type]
+                    _append_journal(temp_dir, asset.name)
+
+                if on_progress is not None and throttle.ready():
+                    await on_progress(
+                        f"更新中 {completed}/{total} · 已下载 {summarize_size(downloaded)}"
+                    )
+
+            removed = await _remove_unused(game_dir, summary.removals)
+            write_local_version(game_dir, plan.remote_version)
+            await asyncio.to_thread(shutil.rmtree, temp_dir, True)
+
+            if on_progress is not None:
+                await on_progress(
+                    f"原神客户端更新完成 {plan.local_version or '?'} -> "
+                    f"{plan.remote_version or '?'}"
+                    + (f"，清理旧文件 {removed} 个" if removed else "")
+                )
+            return InstallResult(
+                success=True,
+                message="更新完成",
+                version=plan.remote_version,
+                files_done=completed,
+                files_total=total,
+                bytes_downloaded=downloaded,
+                removed=removed,
+            )
+        except UpdaterError as error:
+            logger.warning("原神更新执行失败: {}", error)
+            return InstallResult(
+                success=False,
+                message=str(error),
+                files_done=completed,
+                files_total=total,
+                bytes_downloaded=downloaded,
+            )
+        except PathUnsafeError as error:
+            logger.warning("原神更新路径校验失败: {}", error)
+            return InstallResult(
+                success=False,
+                message=f"清单路径不可信：{error}",
+                files_done=completed,
+                files_total=total,
+                bytes_downloaded=downloaded,
+            )
+        except OSError as error:
+            logger.warning("原神更新写入失败: {}", error)
+            return InstallResult(
+                success=False,
+                message=f"写入游戏目录失败：{error}",
+                files_done=completed,
+                files_total=total,
+                bytes_downloaded=downloaded,
+            )
+        finally:
+            if owned:
+                await http.aclose()
+
+
+class _Throttle:
+    """把进度行压到固定间隔一条。"""
+
+    def __init__(self, interval: float) -> None:
+        """记录间隔并置零起点。
+
+        Args:
+            interval: 最小间隔（秒）。
+        """
+        self._interval = interval
+        self._last = 0.0
+
+    def ready(self) -> bool:
+        """现在是否该发一条。
+
+        Returns:
+            距上次放行已超过间隔时为真。
+        """
+        now = time.monotonic()
+        if now - self._last < self._interval:
+            return False
+        self._last = now
+        return True
