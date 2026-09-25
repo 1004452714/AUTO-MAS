@@ -61,6 +61,7 @@ from .tools import (
     team_resolver,
 )
 from .tools.drop_statistics import parse_drop_lines
+from .tools.game_update import ensure_game_updated
 from .tools.one_dragon_plan import (
     build_combat_steps,
     parse_one_dragon_plan,
@@ -996,6 +997,16 @@ class AutoProxyTask(TaskExecuteBase):
 
     async def main_task(self):
         await self.prepare()
+
+        # 先接管原神客户端更新：切换账号与一条龙都会拉起游戏，客户端停在旧版本时
+        # 只会让整轮任务白跑，所以这一步必须在最前面
+        if not await ensure_game_updated(
+            self.script_config, self.cur_user_config, on_log=self._push_dispatch_log
+        ):
+            self.cur_user_item.status = "异常"
+            self.script_info.log = "原神客户端未就绪，已中止任务"
+            logger.error(f"用户 {self.cur_user_item.name} 的原神客户端未就绪，中止任务")
+            return
 
         self.cur_user_item.status = "运行"
 
