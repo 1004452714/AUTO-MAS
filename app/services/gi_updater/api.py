@@ -208,6 +208,38 @@ def _package_info(branch: Any, preset: PresetConfig) -> PackageInfo:
     )
 
 
+def _find_branch_entry(entries: Any, preset: PresetConfig) -> dict:
+    """在 ``game_branches[]`` 里挑出本预设那一款。
+
+    一个 launcher 分组下挂着多款游戏，URL 上的 ``game_ids[]`` 只是请服务端少发几条，最终
+    仍以本地比对为准。先按 ``game_id`` 精确命中：同 biz 可能占好几条（实测国际服的
+    ``bh3_global`` 有 4 条不同 id），只比 biz 会挑到别的发行版。
+
+    Raises:
+        UpdaterError: 一款都对不上。此时宁可按「问不出」放行，也不能拿别款游戏的
+            ``package_id`` 继续算计划——``getBuild`` 会照样返回那份清单，往下就是往这个
+            客户端目录里写别人的文件。
+    """
+    by_biz = None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        game = entry.get("game")
+        if not isinstance(game, dict):
+            continue
+        if preset.game_id and str(game.get("id") or "") == preset.game_id:
+            return entry
+        if (
+            by_biz is None
+            and preset.launcher_biz_name
+            and str(game.get("biz") or "") == preset.launcher_biz_name
+        ):
+            by_biz = entry
+    if by_biz is not None:
+        return by_biz
+    raise UpdaterError(f"{preset.profile_name}：分支响应里没有这款游戏的条目")
+
+
 async def fetch_branches(
     client: httpx.AsyncClient, preset: PresetConfig
 ) -> tuple[PackageInfo, PackageInfo | None]:
@@ -217,18 +249,17 @@ async def fetch_branches(
         ``(主分支, 预下载分支或 None)``。
 
     Raises:
-        UpdaterError: 接口异常、没有分支、或主分支缺字段。
+        UpdaterError: 接口异常、响应里没有这款游戏的分支、或主分支缺字段。
     """
     payload = await request_json(client, preset.game_branches_url)
     entries = data_mapping(payload).get("game_branches") or []
     if not entries:
         raise UpdaterError(f"{preset.profile_name}：getGameBranches 没有返回分支")
-    entry = entries[0]
-    if not isinstance(entry, dict):
-        raise UpdaterError(f"{preset.profile_name}：分支条目不是对象")
+    entry = _find_branch_entry(entries, preset)
     main = entry.get("main")
     if not isinstance(main, dict):
         raise UpdaterError(f"{preset.profile_name}：分支里没有 main")
+    # 预下载只在这同一款游戏的条目里找，不跨条目兜底
     preload = entry.get("pre_download")
     return (
         _package_info(main, preset),
