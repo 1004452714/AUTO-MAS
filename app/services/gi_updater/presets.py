@@ -184,11 +184,18 @@ class PresetConfig:
     def game_branches_url(self) -> str:
         """``getGameBranches`` 完整 URL。
 
-        基于 ``api_base`` 拼接 ``/hyp/hyp-connect/api/getGameBranches``，并带 ``launcher_id`` 参数。
+        基于 ``api_base`` 拼接 ``/hyp/hyp-connect/api/getGameBranches``，带 ``launcher_id``
+        与本游戏的 ``game_ids[]``。
+
+        Note:
+            ``game_ids[]`` 不能省：一个 launcher 分组下挂着多款游戏，不带它时实测官服返回
+            4 条、国际服返回 8 条（绝区零、星穹铁道、原神、崩坏三混在一起，且同 biz 可能
+            占好几条），第一条并不是原神。服务端过滤之外，取条目时仍按游戏身份本地校验
+            （见 :func:`~app.services.gi_updater.api._find_branch_entry`）。
         """
         return (
             f"{self.api_base}/hyp/hyp-connect/api/getGameBranches"
-            f"?launcher_id={self.launcher_id}"
+            f"?launcher_id={self.launcher_id}&game_ids[]={self.game_id}"
         )
 
     def build_get_build_url(

@@ -380,9 +380,11 @@ async def _gate(
     # 自动接管只应用增量差分包：拿不到差分（全新安装、逐文件全量比对、预下载）一律
     # 停手交给官方启动器，绝不在无人值守时顺手灌几十 GB 整包。
     if plan.kind != UpdateKind.SophonPatch:
+        # 这几种结论都没有待下清单（引擎不为它们收集资产），所以不提体积——报「约 0 B」
+        # 会让人以为白下一趟
+        reason = f"{plan.message}，" if plan.message else ""
         return _stop(
-            f"本次是{label(plan.kind)}（约 {summarize_size(plan.total_size)}），"
-            f"{plan.message + '，' if plan.message else ''}"
+            f"本次是{label(plan.kind)}，{reason}"
             "MAS 只自动应用增量包，已停止，请用官方启动器更新",
             kind=plan.kind,
         )
