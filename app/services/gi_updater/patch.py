@@ -363,13 +363,20 @@ class ExternalHDiffPatcher(HDiffPatcher):
     用法：``hpatchz [-f] <oldFile> <diffFile> <outNewFile>``
     """
 
-    def __init__(self, executable: str = "hpatchz") -> None:
-        """记录外部 ``hpatchz`` 可执行文件名或路径。
+    #: 单个文件的补丁时限（秒）：卡死的 hpatchz 不该把整轮调度任务挂住
+    TIMEOUT_SEC = 600
+
+    def __init__(
+        self, executable: str = "hpatchz", timeout_sec: float = TIMEOUT_SEC
+    ) -> None:
+        """记录外部 ``hpatchz`` 可执行文件名或路径与单文件时限。
 
         Args:
             executable: ``hpatchz`` 命令名或绝对路径，默认 ``"hpatchz"``。
+            timeout_sec: 单次调用的最长等待秒数，超时按该文件失败处理。
         """
         self.executable = executable
+        self.timeout_sec = timeout_sec
 
     @property
     def available(self) -> bool:
@@ -397,10 +404,18 @@ class ExternalHDiffPatcher(HDiffPatcher):
                 f"未找到 {self.executable}；需要 HDiffPatch 才能打增量包"
             )
         os.makedirs(os.path.dirname(os.path.abspath(new_path)) or ".", exist_ok=True)
-        result = subprocess.run(
-            [self.executable, "-f", old_path, diff_path, new_path],
-            capture_output=True,
-        )
+        try:
+            result = subprocess.run(
+                [self.executable, "-f", old_path, diff_path, new_path],
+                capture_output=True,
+                timeout=self.timeout_sec,
+            )
+        except subprocess.TimeoutExpired as error:
+            # 没有超时的话一个卡死的 hpatchz 会把整轮调度任务挂在那里，
+            # 用户只能强杀进程；报出去后由上层按单文件失败继续或直接降级
+            raise RuntimeError(
+                f"{self.executable} 超过 {self.timeout_sec} 秒未结束，已放弃该文件"
+            ) from error
         if result.returncode != 0:
             raise RuntimeError(
                 f"{self.executable} 执行失败（{result.returncode}）："

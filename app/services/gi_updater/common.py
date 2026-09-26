@@ -405,8 +405,13 @@ class IniFile:
     def load(cls, path: str) -> "IniFile":
         """从磁盘加载 ini；文件不存在时返回空文档。
 
-        保留原文件注释、键顺序与换行风格：自动探测 UTF-8 / UTF-8-BOM / UTF-16
+        保留键顺序、换行风格与 BOM：自动探测 UTF-8 / UTF-8-BOM / UTF-16
         编码，并记录首个段之前的前导内容到 ``preamble``。
+
+        Note:
+            段与键之外的行（``;`` / ``#`` 注释等）**不会被解析、也不会在写回时保留**——
+            米哈游与启动器会往 ``config.ini`` 里写自己的注释，写回前要想清楚是否
+            真的需要整份重写。
 
         Args:
             path: ini 文件路径。
@@ -485,8 +490,13 @@ class IniFile:
         directory = os.path.dirname(os.path.abspath(path))
         if directory and not os.path.isdir(directory):
             os.makedirs(directory, exist_ok=True)
-        with open(path, "w", encoding=self.encoding, newline="") as handle:
-            handle.write(self.dumps())
+        # 整份落盘后原子改名：直接 open(w) 会先把用户的游戏配置截成空文件，
+        # 写一半时断电或进程被杀就留下一份坏 ini，游戏自己都起不来
+        from pathlib import Path as _Path
+
+        from app.utils.io import atomic_write as _atomic_write
+
+        _atomic_write(_Path(path), self.dumps().encode(self.encoding))
 
 
 def summarize_size(size: float) -> str:
