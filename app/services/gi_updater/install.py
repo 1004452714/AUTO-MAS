@@ -55,6 +55,7 @@ from app.services.gi_updater.patch import (
     ExternalHDiffPatcher,
     SophonPatchAsset,
     SophonPatcher,
+    SophonPatchMethod,
     build_patch_assets,
 )
 from app.services.gi_updater.presets import PresetConfig
@@ -111,6 +112,8 @@ class PatchSpaceNeed:
     peak: int = 0
     #: 本地尺寸已对上、本轮只需复核不必下载的文件数
     already_done: int = 0
+    #: 本机差分基线不可用、要从主清单整文件重下的文件数
+    downgraded: int = 0
 
     @property
     def disk_need(self) -> int:
@@ -710,12 +713,37 @@ class InstallManagerBase:
             if current == asset.target_file_size:
                 need.already_done += 1
                 continue
-            need.download_left += asset.patch_chunk_length
+            # 要打补丁的资产先看本机基线还能不能用：旧文件缺失或体积对不上就一定
+            # 会降级成整文件下载（不必算哈希即可判定），这时要下的不是差分那几 MB，
+            # 而是主清单里的整个新文件——照差分长度算会同时低估进度分母与磁盘门禁。
+            fetched = asset.patch_chunk_length
+            flying = asset.target_file_size + asset.patch_chunk_length
+            if self._patch_basis_unusable(asset):
+                need.downgraded += 1
+                fetched = asset.main_asset.asset_size if asset.main_asset else 0
+                flying = asset.target_file_size * 2
+            need.download_left += fetched
             need.write_growth += max(0, asset.target_file_size - max(current, 0))
-            need.peak = max(
-                need.peak, asset.target_file_size + asset.patch_chunk_length
-            )
+            need.peak = max(need.peak, flying)
         return need
+
+    def _patch_basis_unusable(self, asset: SophonPatchAsset) -> bool:
+        """判断这条差分的本机基线是否一定不可用（只 stat，不算哈希）。
+
+        Args:
+            asset: 待判定的补丁资产。
+
+        Returns:
+            需要打补丁、且旧文件不存在或体积与清单不符时为真；CopyOver 不依赖
+            旧文件，恒为假。尺寸恰好但内容已变的情形这里判不出来，留给执行期的
+            MD5 复核兜底——那时也照样降级，只是这一步的估算会偏小。
+        """
+        if asset.patch_method is not SophonPatchMethod.Patch or not self.game_path:
+            return False
+        old = _resolve_target_path(self.game_path, asset.original_file_path)
+        return (
+            not os.path.isfile(old) or os.path.getsize(old) != asset.original_file_size
+        )
 
     @staticmethod
     def _is_excluded(matching_field: str, patterns: Sequence[str]) -> bool:
@@ -884,8 +912,8 @@ class InstallManagerBase:
 
         Note:
             失败定义为「仍有文件未落盘」（含 HDiff 不可用、降级后仍失败与
-            单文件异常的项）；字节数只计入被标记 ``needs_download``
-            的资产，且按 ``patch_chunk_length``（真正要从网络取的字节）累加。
+            单文件异常的项）。字节数取补丁器回报的实际取回量——降级整包的资产
+            取的是整个新文件，按计划里的差分长度累加会把它报小。
         """
         patcher = SophonPatcher(
             client=self.client,
@@ -901,11 +929,9 @@ class InstallManagerBase:
         result.method_counts = counts
         result.file_done = sum(counts.values())
         result.file_failed = len(patcher.failed)
-        result.bytes_downloaded = sum(
-            asset.patch_chunk_length
-            for asset in plan.patch_assets
-            if asset.needs_download
-        )
+        # 取回量按实际发生数计：降级成整文件的那些资产取的远不止
+        # patch_chunk_length，按计划累加会把这一轮真实下载量报小
+        result.bytes_downloaded = patcher.bytes_fetched
         result.success = result.file_failed == 0
         result.message = (
             "" if result.success else f"{result.file_failed} 个文件未能落盘"

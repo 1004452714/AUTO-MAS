@@ -434,6 +434,8 @@ class SophonPatcher:
     pending_hdiff: List[SophonPatchAsset] = field(default_factory=list)
     #: 本轮未落盘成功的文件（含 pending_hdiff 与降级后仍失败的项）
     failed: List[str] = field(default_factory=list)
+    #: 本轮实际从网络取回的字节：差分按分段长度、降级整包按新文件大小
+    bytes_fetched: int = 0
 
     def __post_init__(self) -> None:
         """补默认日志器、补 ``patch_output_dir`` 与默认下载器。"""
@@ -550,7 +552,11 @@ class SophonPatcher:
             ``True`` 表示下载并校验成功；失败返回 ``False``。
         """
         assert self.downloader is not None and asset.main_asset is not None
-        return self.downloader.download_asset(asset.main_asset, self.game_path)
+        if not self.downloader.download_asset(asset.main_asset, self.game_path):
+            return False
+        # 降级整包取的是主清单里的整个文件，与安装层估算待下量时的口径一致
+        self.bytes_fetched += asset.main_asset.asset_size
+        return True
 
     def _copy_over(self, asset: SophonPatchAsset) -> bool:
         """—— 下载 patch chunk 并按偏移写入目标文件。
@@ -781,6 +787,9 @@ class SophonPatcher:
                     f"差分档案 {asset.patch_name_source} MD5 不符"
                     f"（期望 {asset.patch_hash}，实际 {actual}）"
                 )
+
+        # 记账按真实过网的字节数：解压后的长度会比传输量大数倍，报给用户会虚高
+        self.bytes_fetched += len(data)
 
         if chunks_info.is_use_compression:
             data = decompress(data)
