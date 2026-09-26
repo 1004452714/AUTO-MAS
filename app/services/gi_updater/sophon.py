@@ -16,11 +16,9 @@
 #   You should have received a copy of the GNU Affero General Public License
 #   along with AUTO-MAS. If not, see <https://www.gnu.org/licenses/>.
 
-"""
-Sophon 分块下载内核 —— （``SophonManifest`` /
-``SophonAsset`` / ``SophonAsset.Download`` / ``SophonUpdate``）。
+"""Sophon 下载链路：清单 protobuf 解码、zstd 解压、清单解析与分块下载。
 
-整条链路（的等价流程）::
+整条链路（上游的等价流程）::
 
     getGameBranches                      拿 package_id / branch / password / tag
         └─ getBuild(plat_app=biz, ...)   拿 manifests[]（每个 matching_field 一条）
@@ -31,33 +29,94 @@ Sophon 分块下载内核 —— （``SophonManifest`` /
                         → 校验 chunk 解压后 MD5 → 校验整文件 MD5
 
 关键不变式：
+
     * ``matching_field`` 决定清单类别：``game`` 是主资源，
       ``zh-cn / en-us / ja-jp / ko-kr`` 是各语言语音包
     * 语音包就是「换一个 matching_field 再走一遍完全相同的流程」
     * chunk 是按**偏移直写**，不是先落临时文件再合并
+
+清单与差分档案的正文都是 protobuf。这里用 protobuf 官方运行时按 schema 构造消息类，
+不再自研 wire format 解码：手写的长度前缀解析分不出 ``bytes`` / ``string`` / 嵌套消息，
+只能靠预先声明「哪些字段号是消息」来补，内层解析失败还要吞掉异常退回原始 bytes。
+也不入库 ``protoc`` 生成物——生成物把 schema 编译成不可读的序列化字节，评审与后续
+维护都得先装工具链；显式写出字段号反而能逐条对照上游 ``.proto``。解出的消息一律转成
+小 dataclass 再交给上层，上游的 ``PascalCase`` 字段名不外泄。
+
+上游原始定义（MIT，Hi3Helper.Sophon 项目，署名见 :mod:`app.services.gi_updater`）::
+
+    message SophonManifestProto { repeated SophonManifestAssetProperty Assets = 1; }
+    message SophonManifestAssetProperty {
+      string AssetName = 1; repeated SophonManifestAssetChunk AssetChunks = 2;
+      int32 AssetType = 3; int64 AssetSize = 4; string AssetHashMd5 = 5;
+    }
+    message SophonManifestAssetChunk {
+      string ChunkName = 1; string ChunkDecompressedHashMd5 = 2;
+      int64 ChunkOnFileOffset = 3; int64 ChunkSize = 4; int64 ChunkSizeDecompressed = 5;
+    }
+
+    message SophonPatchProto {
+      repeated SophonPatchAssetProperty PatchAssets = 1;
+      repeated SophonUnusedAssetProperty UnusedAssets = 2;
+    }
+    message SophonPatchAssetProperty {
+      string AssetName = 1; int64 AssetSize = 2; string AssetHashMd5 = 3;
+      repeated SophonPatchAssetInfo AssetInfos = 4;
+    }
+    message SophonPatchAssetInfo { string VersionTag = 1; SophonPatchAssetChunk Chunk = 2; }
+    message SophonPatchAssetChunk {
+      string PatchName = 1; string VersionTag = 2; string BuildId = 3; int64 PatchSize = 4;
+      string PatchMd5 = 5; int64 PatchOffset = 6; int64 PatchLength = 7;
+      string OriginalFileName = 8; int64 OriginalFileLength = 9; string OriginalFileMd5 = 10;
+    }
+    message SophonUnusedAssetProperty { string VersionTag = 1; repeated SophonUnusedAssetInfo AssetInfos = 2; }
+    message SophonUnusedAssetInfo { repeated SophonUnusedAssetFile Assets = 1; }
+    message SophonUnusedAssetFile { string FileName = 1; int64 FileSize = 2; string FileMd5 = 3; }
+
+zstd 侧统一走 ``zstandard`` 包（``pyproject.toml`` 里是硬依赖），不做多后端降级探测。
+
+本模块是协议层，不含任何游戏知识。差分清单与补丁落盘见 :mod:`patch`。
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Iterator, List, Optional, Sequence
 
-from app.services.gi_updater.api.client import HttpClient
-from app.services.gi_updater.api.models import SophonManifestBuildBranch
-from app.services.gi_updater.common.logging import get_logger
-from app.services.gi_updater.common.paths import safe_join
-from app.services.gi_updater.common.progress import (
+import zstandard
+from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+
+from app.services.gi_updater.api import (
+    HttpClient,
+    SophonManifestBuildBranch,
+)
+from app.services.gi_updater.common import (
     ProgressBase,
+    UpdateAborted,
+    get_logger,
+    safe_join,
     summarize_size,
 )
-from app.services.gi_updater.download.protobuf import parse_sophon_manifest
-from app.services.gi_updater.download.zstd import iter_decompress
-from app.services.gi_updater.errors import UpdateAborted
 
 __all__ = [
+    "SophonManifestProto",
+    "SophonAssetProperty",
+    "SophonAssetChunk",
+    "SophonPatchProto",
+    "SophonPatchAssetProperty",
+    "SophonPatchAssetInfo",
+    "SophonPatchChunk",
+    "SophonUnusedAssetProperty",
+    "SophonUnusedAssetInfo",
+    "SophonUnusedAssetFile",
+    "parse_sophon_manifest",
+    "parse_sophon_patch",
+    "decompress",
+    "iter_decompress",
+    "ZstdError",
     "SophonManifestInfo",
     "SophonChunksInfo",
     "SophonChunkManifestInfoPair",
@@ -68,6 +127,477 @@ __all__ = [
     "SophonError",
     "VOICE_MATCHING_FIELDS",
 ]
+
+
+_PROTO_PACKAGE = "Hi3Helper.Sophon.Protos"
+_proto_pool = descriptor_pool.DescriptorPool()
+
+_STRING = descriptor_pb2.FieldDescriptorProto.TYPE_STRING
+_INT32 = descriptor_pb2.FieldDescriptorProto.TYPE_INT32
+_INT64 = descriptor_pb2.FieldDescriptorProto.TYPE_INT64
+_MESSAGE = descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE
+_SCALAR = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+_REPEATED = descriptor_pb2.FieldDescriptorProto.LABEL_REPEATED
+
+#: 一条字段定义：``(字段名, 字段号, 类型, label, 嵌套类型名)``；标量类型的嵌套名传空串
+_FieldSpec = tuple[str, int, int, int, str]
+
+
+def _add_message(
+    file_proto: descriptor_pb2.FileDescriptorProto,
+    name: str,
+    fields: Sequence[_FieldSpec],
+) -> None:
+    """往文件描述符里加一个 message 定义。
+
+    Args:
+        file_proto: 目标文件描述符。
+        name: message 名。
+        fields: 字段定义序列，每项为 ``(字段名, 字段号, 类型, label, 嵌套类型名)``。
+    """
+    message = file_proto.message_type.add()
+    message.name = name
+    for field_name, number, field_type, label, type_name in fields:
+        entry = message.field.add()
+        entry.name = field_name
+        entry.number = number
+        entry.type = field_type
+        entry.label = label
+        if type_name:
+            entry.type_name = f".{_PROTO_PACKAGE}.{type_name}"
+
+
+def _build_proto_file(
+    file_name: str,
+    messages: Sequence[tuple[str, Sequence[_FieldSpec]]],
+) -> None:
+    """注册一个 proto 文件描述符。
+
+    Args:
+        file_name: 文件名（仅用于描述符内标识）。
+        messages: ``(message 名, 字段序列)`` 序列。
+    """
+    file_proto = descriptor_pb2.FileDescriptorProto()
+    file_proto.name = file_name
+    file_proto.package = _PROTO_PACKAGE
+    file_proto.syntax = "proto3"
+    for name, fields in messages:
+        _add_message(file_proto, name, fields)
+    _proto_pool.Add(file_proto)
+
+
+def _message_class(name: str) -> type:
+    """取已注册 message 的 Python 类。
+
+    Args:
+        name: message 名（不含包名）。
+
+    Returns:
+        可用于 ``ParseFromString`` 的消息类。
+    """
+    descriptor = _proto_pool.FindMessageTypeByName(f"{_PROTO_PACKAGE}.{name}")
+    return message_factory.GetMessageClass(descriptor)
+
+
+_build_proto_file(
+    "SophonManifestProto.proto",
+    [
+        (
+            "SophonManifestProto",
+            [("Assets", 1, _MESSAGE, _REPEATED, "SophonManifestAssetProperty")],
+        ),
+        (
+            "SophonManifestAssetProperty",
+            [
+                ("AssetName", 1, _STRING, _SCALAR, ""),
+                ("AssetChunks", 2, _MESSAGE, _REPEATED, "SophonManifestAssetChunk"),
+                ("AssetType", 3, _INT32, _SCALAR, ""),
+                ("AssetSize", 4, _INT64, _SCALAR, ""),
+                ("AssetHashMd5", 5, _STRING, _SCALAR, ""),
+            ],
+        ),
+        (
+            "SophonManifestAssetChunk",
+            [
+                ("ChunkName", 1, _STRING, _SCALAR, ""),
+                ("ChunkDecompressedHashMd5", 2, _STRING, _SCALAR, ""),
+                ("ChunkOnFileOffset", 3, _INT64, _SCALAR, ""),
+                ("ChunkSize", 4, _INT64, _SCALAR, ""),
+                ("ChunkSizeDecompressed", 5, _INT64, _SCALAR, ""),
+            ],
+        ),
+    ],
+)
+
+_build_proto_file(
+    "SophonPatchProto.proto",
+    [
+        (
+            "SophonPatchProto",
+            [
+                ("PatchAssets", 1, _MESSAGE, _REPEATED, "SophonPatchAssetProperty"),
+                ("UnusedAssets", 2, _MESSAGE, _REPEATED, "SophonUnusedAssetProperty"),
+            ],
+        ),
+        (
+            "SophonPatchAssetProperty",
+            [
+                ("AssetName", 1, _STRING, _SCALAR, ""),
+                ("AssetSize", 2, _INT64, _SCALAR, ""),
+                ("AssetHashMd5", 3, _STRING, _SCALAR, ""),
+                ("AssetInfos", 4, _MESSAGE, _REPEATED, "SophonPatchAssetInfo"),
+            ],
+        ),
+        (
+            "SophonPatchAssetInfo",
+            [
+                ("VersionTag", 1, _STRING, _SCALAR, ""),
+                ("Chunk", 2, _MESSAGE, _SCALAR, "SophonPatchAssetChunk"),
+            ],
+        ),
+        (
+            "SophonPatchAssetChunk",
+            [
+                ("PatchName", 1, _STRING, _SCALAR, ""),
+                ("VersionTag", 2, _STRING, _SCALAR, ""),
+                ("BuildId", 3, _STRING, _SCALAR, ""),
+                ("PatchSize", 4, _INT64, _SCALAR, ""),
+                ("PatchMd5", 5, _STRING, _SCALAR, ""),
+                ("PatchOffset", 6, _INT64, _SCALAR, ""),
+                ("PatchLength", 7, _INT64, _SCALAR, ""),
+                ("OriginalFileName", 8, _STRING, _SCALAR, ""),
+                ("OriginalFileLength", 9, _INT64, _SCALAR, ""),
+                ("OriginalFileMd5", 10, _STRING, _SCALAR, ""),
+            ],
+        ),
+        (
+            "SophonUnusedAssetProperty",
+            [
+                ("VersionTag", 1, _STRING, _SCALAR, ""),
+                ("AssetInfos", 2, _MESSAGE, _REPEATED, "SophonUnusedAssetInfo"),
+            ],
+        ),
+        (
+            "SophonUnusedAssetInfo",
+            [("Assets", 1, _MESSAGE, _REPEATED, "SophonUnusedAssetFile")],
+        ),
+        (
+            "SophonUnusedAssetFile",
+            [
+                ("FileName", 1, _STRING, _SCALAR, ""),
+                ("FileSize", 2, _INT64, _SCALAR, ""),
+                ("FileMd5", 3, _STRING, _SCALAR, ""),
+            ],
+        ),
+    ],
+)
+
+_ManifestMessage = _message_class("SophonManifestProto")
+_PatchMessage = _message_class("SophonPatchProto")
+
+
+# --------------------------------------------------------------------------- #
+# Sophon 清单（SophonManifestProto）
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class SophonAssetChunk:
+    """清单里一个 asset 所引用的数据块。"""
+
+    chunk_name: str = ""
+    chunk_decompressed_hash_md5: str = ""
+    chunk_on_file_offset: int = 0
+    chunk_size: int = 0
+    chunk_size_decompressed: int = 0
+
+
+@dataclass
+class SophonAssetProperty:
+    """清单里的一个资源条目。"""
+
+    asset_name: str = ""
+    asset_type: int = 0
+    asset_size: int = 0
+    asset_hash_md5: str = ""
+    asset_chunks: List[SophonAssetChunk] = field(default_factory=list)
+
+    @property
+    def is_directory(self) -> bool:
+        """目录项的判定：``asset_type != 0``。"""
+        return self.asset_type != 0
+
+
+@dataclass
+class SophonManifestProto:
+    """解析后的 Sophon 主清单。"""
+
+    assets: List[SophonAssetProperty] = field(default_factory=list)
+
+
+def parse_sophon_manifest(data: bytes) -> SophonManifestProto:
+    """解析 Sophon 清单 protobuf。
+
+    Args:
+        data: 原始清单字节（通常已 zstd 解压）。
+
+    Returns:
+        :class:`SophonManifestProto`，含 ``assets`` 列表。
+
+    Raises:
+        google.protobuf.message.DecodeError: 字节不符合清单 schema 时。
+    """
+    message = _ManifestMessage()
+    message.ParseFromString(data)
+
+    return SophonManifestProto(
+        assets=[
+            SophonAssetProperty(
+                asset_name=asset.AssetName,
+                asset_type=asset.AssetType,
+                asset_size=asset.AssetSize,
+                asset_hash_md5=asset.AssetHashMd5,
+                asset_chunks=[
+                    SophonAssetChunk(
+                        chunk_name=chunk.ChunkName,
+                        chunk_decompressed_hash_md5=chunk.ChunkDecompressedHashMd5,
+                        chunk_on_file_offset=chunk.ChunkOnFileOffset,
+                        chunk_size=chunk.ChunkSize,
+                        chunk_size_decompressed=chunk.ChunkSizeDecompressed,
+                    )
+                    for chunk in asset.AssetChunks
+                ],
+            )
+            for asset in message.Assets
+        ]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Sophon 差分（SophonPatchProto）
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class SophonPatchChunk:
+    """差分档案里一条分片的坐标与基线信息。"""
+
+    patch_name: str = ""
+    version_tag: str = ""
+    build_id: str = ""
+    patch_size: int = 0
+    patch_md5: str = ""
+    patch_offset: int = 0
+    patch_length: int = 0
+    original_file_name: str = ""
+    original_file_length: int = 0
+    original_file_md5: str = ""
+
+
+@dataclass
+class SophonPatchAssetInfo:
+    """某个可升级基线对应的差分信息。
+
+    Note:
+        上游把 ``Chunk`` 声明为单值，这里也按单值取：没有该字段时 ``chunks``
+        为空列表，与上层 ``info.chunks[0] if info.chunks else None`` 的口径一致。
+    """
+
+    version_tag: str = ""
+    chunks: List[SophonPatchChunk] = field(default_factory=list)
+
+
+@dataclass
+class SophonPatchAssetProperty:
+    """差分清单里的一个 asset 条目。"""
+
+    asset_name: str = ""
+    asset_size: int = 0
+    asset_hash_md5: str = ""
+    asset_infos: List[SophonPatchAssetInfo] = field(default_factory=list)
+
+
+@dataclass
+class SophonUnusedAssetFile:
+    """升级后不再被引用的一个旧文件。"""
+
+    file_name: str = ""
+    file_size: int = 0
+    file_md5: str = ""
+
+
+@dataclass
+class SophonUnusedAssetInfo:
+    """一批不再被引用的旧文件。"""
+
+    assets: List[SophonUnusedAssetFile] = field(default_factory=list)
+
+
+@dataclass
+class SophonUnusedAssetProperty:
+    """某个基线升上来之后变成无用的文件清单。
+
+    Note:
+        这里列的是「从某个基线升上来后就不再被引用」的旧文件，跨基线混在一起，
+        因此不能直接照单全删——目标清单里仍然存在的同名文件必须留下。
+    """
+
+    version_tag: str = ""
+    asset_infos: List[SophonUnusedAssetInfo] = field(default_factory=list)
+
+
+@dataclass
+class SophonPatchProto:
+    """解析后的 Sophon 差分清单。"""
+
+    patch_assets: List[SophonPatchAssetProperty] = field(default_factory=list)
+    unused_assets: List[SophonUnusedAssetProperty] = field(default_factory=list)
+
+
+def _to_patch_chunk(chunk: Any) -> SophonPatchChunk:
+    """把上游的差分分片转成内部 dataclass。
+
+    Args:
+        chunk: ``SophonPatchAssetChunk`` 消息实例。
+
+    Returns:
+        对应的 :class:`SophonPatchChunk`。
+    """
+    return SophonPatchChunk(
+        patch_name=chunk.PatchName,
+        version_tag=chunk.VersionTag,
+        build_id=chunk.BuildId,
+        patch_size=chunk.PatchSize,
+        patch_md5=chunk.PatchMd5,
+        patch_offset=chunk.PatchOffset,
+        patch_length=chunk.PatchLength,
+        original_file_name=chunk.OriginalFileName,
+        original_file_length=chunk.OriginalFileLength,
+        original_file_md5=chunk.OriginalFileMd5,
+    )
+
+
+def parse_sophon_patch(data: bytes) -> SophonPatchProto:
+    """解析 Sophon 差分清单 protobuf。
+
+    Args:
+        data: 原始差分清单字节（通常已 zstd 解压）。
+
+    Returns:
+        :class:`SophonPatchProto`，含 ``patch_assets`` 与 ``unused_assets``。
+
+    Raises:
+        google.protobuf.message.DecodeError: 字节不符合差分 schema 时。
+    """
+    message = _PatchMessage()
+    message.ParseFromString(data)
+
+    return SophonPatchProto(
+        patch_assets=[
+            SophonPatchAssetProperty(
+                asset_name=asset.AssetName,
+                asset_size=asset.AssetSize,
+                asset_hash_md5=asset.AssetHashMd5,
+                asset_infos=[
+                    SophonPatchAssetInfo(
+                        version_tag=info.VersionTag,
+                        chunks=(
+                            [_to_patch_chunk(info.Chunk)]
+                            if info.HasField("Chunk")
+                            else []
+                        ),
+                    )
+                    for info in asset.AssetInfos
+                ],
+            )
+            for asset in message.PatchAssets
+        ],
+        unused_assets=[
+            SophonUnusedAssetProperty(
+                version_tag=unused.VersionTag,
+                asset_infos=[
+                    SophonUnusedAssetInfo(
+                        assets=[
+                            SophonUnusedAssetFile(
+                                file_name=item.FileName,
+                                file_size=item.FileSize,
+                                file_md5=item.FileMd5,
+                            )
+                            for item in info.Assets
+                        ]
+                    )
+                    for info in unused.AssetInfos
+                ],
+            )
+            for unused in message.UnusedAssets
+        ],
+    )
+
+
+class ZstdError(RuntimeError):
+    """zstd 解压失败。"""
+
+
+#: 线程各自的解压器：``zstandard.ZstdDecompressor`` 内部持有可复用的解压上下文，
+#: **不是线程安全的**。chunk 下载是多线程并发解压，共享单例会出现
+#: ``Data corruption detected`` / ``Unknown frame descriptor`` 之类的交叉损坏
+#: （实测 2026-09-25），所以按 ``threading.local`` 每线程惰性独享一个实例。
+_ZSTD_LOCAL = threading.local()
+
+
+def _decompressor() -> zstandard.ZstdDecompressor:
+    """返回当前线程独享的 ``zstandard.ZstdDecompressor``。
+
+    Returns:
+        惰性创建、绑定在当前线程上的解压器实例。
+    """
+    impl = getattr(_ZSTD_LOCAL, "impl", None)
+    if impl is None:
+        impl = _ZSTD_LOCAL.impl = zstandard.ZstdDecompressor()
+    return impl
+
+
+def decompress(data: bytes) -> bytes:
+    """一次性解压一段 zstd 数据。
+
+    Args:
+        data: 压缩后的字节。
+
+    Returns:
+        解压后的原始字节。
+
+    Raises:
+        ZstdError: zstandard 解压失败时。
+    """
+    try:
+        return _decompressor().decompress(data)
+    except zstandard.ZstdError as exc:
+        raise ZstdError(f"zstd 解压失败: {exc}") from exc
+
+
+def iter_decompress(stream: Any, chunk_size: int = 65536) -> Iterator[bytes]:
+    """流式解压，边读边产出，内存友好（大 chunk 用）。
+
+    Args:
+        stream: 提供 ``read()`` 的类文件对象（原始压缩流）。
+        chunk_size: 每块最大字节数。
+
+    Yields:
+        解压后的数据块（``bytes``）。
+
+    Raises:
+        ZstdError: zstandard 解压失败时。
+    """
+    try:
+        with _decompressor().stream_reader(stream) as reader:
+            while True:
+                chunk = reader.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+    except zstandard.ZstdError as exc:
+        raise ZstdError(f"zstd 解压失败: {exc}") from exc
+
 
 #: 语音包使用的 matching_field
 VOICE_MATCHING_FIELDS = ("zh-cn", "en-us", "ja-jp", "ko-kr")
@@ -300,7 +830,7 @@ class SophonManifest:
         """
         logger = logger or get_logger()
         payload = client.request(method, url).json()
-        from app.services.gi_updater.api.models import parse_build
+        from app.services.gi_updater.api import parse_build
 
         build = parse_build(payload)
 
@@ -356,7 +886,7 @@ class SophonManifest:
             定位到的信息对（``is_found`` 指示是否成功）。
         """
         logger = logger or get_logger()
-        from app.services.gi_updater.api.models import parse_patch_build
+        from app.services.gi_updater.api import parse_patch_build
 
         payload = client.request("POST", url).json()
         branch = parse_patch_build(payload)

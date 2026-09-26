@@ -49,14 +49,16 @@
 
 """原神客户端更新引擎：检查更新 → 下载 → 安装，全程不依赖官方启动器界面。
 
-分四层，自下而上：
+按职责分成这些模块，自下而上：
 
-- :mod:`~app.services.gi_updater.common`    与游戏无关的基础件（版本号、ini、路径、进度）
-- :mod:`~app.services.gi_updater.api`       预设、启动器元数据接口与阻塞式 HTTP 客户端
-- :mod:`~app.services.gi_updater.versioning` 本地/远程版本、安装状态机与包清单决策
-- :mod:`~app.services.gi_updater.download`  Sophon 清单解析、zstd/protobuf 解码与分块下载
-- :mod:`~app.services.gi_updater.install`   计划编排与落盘收尾
-- :mod:`~app.services.gi_updater.games`     原神差异化钩子与 :func:`create_updater` 装配
+- :mod:`~app.services.gi_updater.common`     与游戏无关的基础件（中止与路径异常、日志、ini、进度）
+- :mod:`~app.services.gi_updater.presets`    每款游戏每个区服的预设（三元组、端点与 Sophon 目录）
+- :mod:`~app.services.gi_updater.api`        启动器元数据接口、响应模型与阻塞式 HTTP 客户端
+- :mod:`~app.services.gi_updater.sophon`     Sophon 清单解析、zstd/protobuf 解码与分块下载
+- :mod:`~app.services.gi_updater.patch`      Sophon 差分清单解析与补丁落盘
+- :mod:`~app.services.gi_updater.versioning` 版本号、本地/远程版本与安装状态机
+- :mod:`~app.services.gi_updater.install`    计划编排与落盘收尾
+- :mod:`~app.services.gi_updater.games`      各游戏差异化钩子与 :func:`create_updater` 装配
 
 本包**全同步**（urllib + 线程 + 阻塞文件 IO），不 import ``app.core``/``app.api``，
 可以脱离宿主单独导入与自测；异步边界与宿主接线在
@@ -66,15 +68,15 @@
 都置 ``is_force_redirect_to_sophon``，传统 zip 链路（下载分包 → 解压 → hdiff →
 deletefiles）对本包永远不可达，故未收录；全新安装（``SophonInstall``）、全量比较
 （``SophonUpdate``）与预下载（``SophonPreload``）只产出计划供宿主提示，无人值守
-一律停手交给官方启动器。要接不支持强制 Sophon 的游戏时，需要补回
-``install/zip_flow.py``、``download/http.py`` 的多会话分片下载器，以及 ``UpdateKind``
-的 zip 取值与 ``build_plan`` 的链路判定。
+一律停手交给官方启动器。要接不支持强制 Sophon 的游戏时，需要补回一条 zip 执行链路、
+多会话分片下载器，以及 ``UpdateKind`` 的 zip 取值与 ``build_plan`` 的链路判定。
 
-新增一款米哈游游戏（如绝区零）的路径：在 :mod:`~app.services.gi_updater.api.profiles`
-加一组 ``(game, region)`` 预设三元组，仿 ``versioning/genshin.py`` /
-``games/genshin.py`` 各写一个子类覆写语音清单与 ``filter_assets`` 等少量钩子，
-再在 :mod:`~app.services.gi_updater.games` 的装配层注册，宿主侧仿
-:mod:`app.services.genshin_updater` 加一个门面。协议层与下载层零改动。
+新增一款米哈游游戏（如绝区零）的路径：在 :mod:`~app.services.gi_updater.presets`
+加一组 ``(game, region)`` 预设三元组，在 ``games/`` 下仿
+:mod:`~app.services.gi_updater.games.genshin` 写一个模块覆写语音清单与
+``filter_assets`` 等少量钩子，再在 :mod:`~app.services.gi_updater.games` 的装配层
+注册，宿主侧仿 :mod:`app.services.genshin_updater` 加一个门面。
+协议层（``sophon`` / ``patch``）与下载层零改动。
 """
 
 from app.services.gi_updater.games import GameUpdater, create_updater

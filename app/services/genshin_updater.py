@@ -46,16 +46,16 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from app.services.gi_updater import create_updater
-from app.services.gi_updater.api.profiles import get_profile
-from app.services.gi_updater.common.progress import (
+from app.services.gi_updater.common import (
     ProgressBase,
     ProgressListener,
     ProgressSnapshot,
+    UpdateAborted,
     summarize_size,
 )
-from app.services.gi_updater.errors import UpdateAborted
+from app.services.gi_updater.games import create_updater
 from app.services.gi_updater.install import UpdateKind
+from app.services.gi_updater.presets import get_profile
 from app.utils import get_logger, sanitize_log_message
 from app.utils.hpatchz import ensure_hpatchz
 

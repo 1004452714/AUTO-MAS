@@ -22,7 +22,7 @@
     execute()    -> InstallResult 真正下载 + 落盘 + 写回版本
     finalize()   -> None          写 game_version / 渠道 / 语音清单
 
-主干：
+主干::
 
     state = get_state()
     NotInstalled / GameBroken  -> SophonInstall
@@ -30,10 +30,11 @@
     InstalledHavePreload       -> SophonPreload
     Installed                  -> Noop
 
-注意：MAS 的宿主门禁只放行 ``SophonPatch``——全新安装、全量比较与预下载
-在无人值守场景一律停手交给官方启动器（zip 全量链路亦未收录）；
-:meth:`execute` 因此只实现差分一条路径。
-「决策」与「执行」分开，便于先看计划、再落盘。
+「决策」与「执行」分开，便于先看计划、再落盘。MAS 的宿主门禁只放行
+``SophonPatch``——全新安装、全量比较与预下载在无人值守场景一律停手交给官方启动器
+（zip 全量链路亦未收录），:meth:`execute` 因此只实现差分一条路径。
+
+按游戏特化的部分留在 ``games/`` 的子类里。
 """
 
 from __future__ import annotations
@@ -44,27 +45,32 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from app.services.gi_updater.api.client import HttpClient, mask_url_password
-from app.services.gi_updater.api.launcher_api import LauncherApi
-from app.services.gi_updater.api.profiles import PresetConfig
-from app.services.gi_updater.common.logging import get_logger
-from app.services.gi_updater.common.progress import ProgressBase
-from app.services.gi_updater.common.version import GameVersion
-from app.services.gi_updater.download import (
+from app.services.gi_updater.api import (
+    HttpClient,
+    LauncherApi,
+    mask_url_password,
+)
+from app.services.gi_updater.common import ProgressBase, get_logger
+from app.services.gi_updater.patch import (
     ExternalHDiffPatcher,
-    SophonAsset,
-    SophonChunkManifestInfoPair,
-    SophonDownloader,
-    SophonManifest,
     SophonPatchAsset,
     SophonPatcher,
     build_patch_assets,
 )
-from app.services.gi_updater.download.sophon import (
+from app.services.gi_updater.presets import PresetConfig
+from app.services.gi_updater.sophon import (
     MAIN_MATCHING_FIELD,
+    SophonAsset,
+    SophonChunkManifestInfoPair,
+    SophonDownloader,
+    SophonManifest,
     _resolve_target_path,
 )
-from app.services.gi_updater.versioning import GameInstallStateEnum, GameVersionBase
+from app.services.gi_updater.versioning import (
+    GameInstallStateEnum,
+    GameVersion,
+    GameVersionBase,
+)
 
 __all__ = [
     "UpdateKind",
@@ -72,6 +78,7 @@ __all__ = [
     "InstallResult",
     "InstallManagerBase",
 ]
+
 
 #: 官方启动器默认保留的语音
 DEFAULT_VOICE_LOCALE = "ja-jp"
