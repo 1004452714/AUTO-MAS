@@ -8,6 +8,7 @@ import {
   WS_TASK_COMPLETED,
   WS_TASK_LOG_UPDATED,
   WS_TASK_NOTICE,
+  type WSTaskCompletedData,
   type WSTaskLogUpdatedData,
   type WSTaskNoticeData,
 } from '@/services/websocket/types'
@@ -51,8 +52,9 @@ export function useBetterGIUpdate(getUserId: () => string) {
   // 快照用它的 log/logSeq 重建，重建期间到达的增量一并丢弃。
   let logSeq: number | null = null
   let logResyncing = false
-  // 报错后任务随即也会走完成事件，用它抑制紧随其后的「任务已结束」成功提示
-  let errored = false
+  // 报错后任务随即也会走完成事件，用它抑制紧随其后的成功提示；用户主动取消或
+  // 超时收尾时同样置位——那之后到达的完成事件不该再被报成「更新成功」
+  let suppressResultToast = false
 
   const clearSession = () => {
     for (const subscriptionId of updateSession.subscriptionIds) {
@@ -66,7 +68,7 @@ export function useBetterGIUpdate(getUserId: () => string) {
     }
   }
 
-  const stopSession = async (): Promise<boolean> => {
+  const stopSession = async (notifyFailure = true): Promise<boolean> => {
     const taskId = updateSession.taskId
     if (!taskId) {
       clearSession()
@@ -80,9 +82,25 @@ export function useBetterGIUpdate(getUserId: () => string) {
       return true
     } catch (e) {
       logger.error(e instanceof Error ? e.message : String(e))
+      if (notifyFailure) {
+        // 停止没成功就意味着任务仍在后台跑，不能只写日志让用户以为已经停了
+        message.error(t('edit.bettergiUpdateStopFailedRunning'))
+      }
       return false
     } finally {
       clearSession()
+    }
+  }
+
+  /** 任务是否仍在运行；查不到时按仍在运行处理，让超时提示照常出现 */
+  const updateStillRunning = async (): Promise<boolean> => {
+    if (!updateSession.taskId) return false
+    try {
+      const snapshot = await realtimeSnapshotApi.getRuntimeTasks()
+      return (snapshot.tasks ?? []).some(task => task.taskId === updateSession.taskId)
+    } catch (e) {
+      logger.warn(`核对原神更新任务状态失败: ${e instanceof Error ? e.message : String(e)}`)
+      return true
     }
   }
 
@@ -146,7 +164,7 @@ export function useBetterGIUpdate(getUserId: () => string) {
         await stopSession()
         return
       }
-      errored = false
+      suppressResultToast = false
       updateSession.subscriptionIds = [
         subscribe({ id: response.taskId, type: WS_TASK_LOG_UPDATED }, wsMessage => {
           applyLog(
@@ -156,17 +174,20 @@ export function useBetterGIUpdate(getUserId: () => string) {
         subscribe({ id: response.taskId, type: WS_TASK_NOTICE }, wsMessage => {
           const data = wsMessage.data as unknown as WSTaskNoticeData
           if (data.level === 'error') {
-            errored = true
+            suppressResultToast = true
             message.error(t('edit.bettergiUpdateFailed', { p0: data.message }))
             updateModal.running = false
             updateModal.open = false
             void stopSession()
           }
         }),
-        subscribe({ id: response.taskId, type: WS_TASK_COMPLETED }, () => {
-          if (!errored) {
-            // 后端已是最新时不做任何下载，日志以「无需更新」收尾；此时提示无需更新，
-            // 而不是成功样式的「任务已结束」（会被读成更新成功）。字面量匹配后端日志
+        subscribe({ id: response.taskId, type: WS_TASK_COMPLETED }, wsMessage => {
+          const data = wsMessage.data as unknown as WSTaskCompletedData
+          // 用后端给出的 outcome 判定，比只看日志可靠：取消/失败不该报成成功。
+          // 任务已结束，无需再发停止请求（那只会白白产生一条失败记录）
+          if (!suppressResultToast && data.outcome === 'success') {
+            // 已是最新时后端不做任何下载，日志以「无需更新」收尾；此时提示无需
+            // 更新，而不是成功样式的「任务已结束」（会被读成更新成功）
             if (updateModal.log.includes('无需更新')) {
               message.info(t('edit.bettergiUpdateUpToDate'))
             } else {
@@ -175,12 +196,27 @@ export function useBetterGIUpdate(getUserId: () => string) {
           }
           updateModal.running = false
           updateModal.open = false
-          void stopSession()
+          clearSession()
         }),
       ]
       updateSession.timeout = window.setTimeout(() => {
-        message.error(t('edit.bettergiUpdateTimed'))
-        void stopSession()
+        void (async () => {
+          // 完成事件已经收过尾（会话已清），超时回调不必再动
+          if (!updateSession.taskId) return
+          // 先复位状态并抑制提示：对账期间到达的完成事件不该再报一次
+          suppressResultToast = true
+          updateModal.running = false
+          updateModal.open = false
+          // 超时前先对账：完成事件在断线或任务秒回时可能丢失，任务其实早已结束，
+          // 这时按结束收尾，而不是报一个假的超时
+          if (await updateStillRunning()) {
+            message.error(t('edit.bettergiUpdateTimed'))
+            void stopSession()
+          } else {
+            message.info(t('edit.bettergiUpdateTask'))
+            clearSession()
+          }
+        })()
       }, UPDATE_TIMEOUT_MS)
     } catch (e) {
       logger.error(e instanceof Error ? e.message : String(e))
@@ -192,6 +228,8 @@ export function useBetterGIUpdate(getUserId: () => string) {
 
   const handleUpdateModalCancel = () => {
     if (updateModal.running) {
+      // 用户主动取消：随后到达的完成事件不该再报成成功
+      suppressResultToast = true
       void stopSession()
     }
     updateModal.running = false
@@ -199,7 +237,8 @@ export function useBetterGIUpdate(getUserId: () => string) {
   }
 
   onUnmounted(() => {
-    void stopSession()
+    // 页面卸载时不再弹提示，失败只记日志
+    void stopSession(false)
   })
 
   return { updateModal, handleCheckUpdate, startUpdate, handleUpdateModalCancel }

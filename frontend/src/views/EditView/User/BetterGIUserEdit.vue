@@ -323,9 +323,7 @@
                       </a-button>
                     </a-input-group>
                   </a-form-item>
-                  <a-tooltip
-                    :title="updateUnsupported ? t('edit.bettergiUpdateUnsupportedHint') : ''"
-                  >
+                  <a-tooltip :title="updateCheckHint">
                     <span class="game-client-check">
                       <a-button
                         size="large"
@@ -1590,6 +1588,14 @@ const updateUnsupported = computed(() => {
 const updateCheckDisabled = computed(
   () => pageLoading.value || !userId.value || configLocked.value || updateUnsupported.value
 )
+
+// 置灰时给出原因：只在「不知道能点什么」时才值得提示，加载中一闪而过就不写了
+const updateCheckHint = computed(() => {
+  if (updateUnsupported.value) return t('edit.bettergiUpdateUnsupportedHint')
+  if (configLocked.value) return t('edit.configLocked')
+  if (!userId.value) return t('edit.bettergiUpdateSaveUserFirst')
+  return ''
+})
 
 const syncGamePathInput = () => {
   gamePathInput.value = formData.Switch.GamePath || gameClientInfo.value?.globalPath || ''

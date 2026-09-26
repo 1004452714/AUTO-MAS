@@ -27,7 +27,7 @@
 
 - **自动入口**（:func:`ensure_game_updated` 默认）：任务启动游戏前按 ``Game.IfAutoUpdate``
   开关检查，查不到/环境不允许就放行，确知需要更新却做不了才阻断；
-- **手动入口**（``manual=True``）：脚本配置页「检查更新」用户主动触发，跳过开关，
+- **手动入口**（``manual=True``）：用户页「检查更新」用户主动触发，跳过开关，
   凡 MAS 无法自动完成的都直接抛错，由用户自己决定后续处理。
 
 两种入口共同的行为策略：
@@ -63,6 +63,30 @@ logger = get_logger("原神更新 BetterGI")
 #: 一行面向用户的进度文案
 LogHook = Callable[[str], Awaitable[None]]
 
+#: 中止判定；为真时更新在文件批次边界收工
+AbortHook = Callable[[], bool]
+
+
+def task_stopped(task: object) -> bool:
+    """用户是否已要求停止本任务（供更新途中在批次边界轮询）。
+
+    与 HSR 的 ``_update_aborted`` 同口径：``stopped_manually`` 覆盖「停止落在
+    任务主体里」，根任务已被取消则覆盖「停止落在更新途中」——两个都看，用户
+    按下停止后才不必等一次几 GB 的下载走完。
+
+    Args:
+        task: 发起更新的任务对象。
+
+    Returns:
+        已要求停止时为真。
+    """
+    if bool(getattr(task, "stopped_manually", False)):
+        return True
+    task_info = getattr(task, "task_info", None)
+    root_task = getattr(task_info, "task", None) if task_info is not None else None
+    return bool(root_task is not None and root_task.cancelled())
+
+
 #: 客户端渠道 → 更新接口区服；不在表里的渠道不接管
 _CHANNEL_TO_REGION: dict[str, str] = {
     game_info.CHANNEL_OFFICIAL: "cn",
@@ -91,6 +115,7 @@ async def ensure_game_updated(
     *,
     on_log: LogHook | None = None,
     manual: bool = False,
+    should_abort: AbortHook | None = None,
 ) -> bool:
     """检查并按需做原神客户端增量更新。
 
@@ -98,10 +123,11 @@ async def ensure_game_updated(
         script_config: BetterGI 脚本配置。
         user_config: 当前用户配置（游戏路径可能被用户级覆盖）。
         on_log: 一行进度文案的回调。
-        manual: 是否为脚本配置页「检查更新」手动触发。``True`` 时忽略
+        manual: 是否为用户页「检查更新」手动触发。``True`` 时忽略
             ``Game.IfAutoUpdate`` 开关，且凡 MAS 无法自动完成的都抛
             ``RuntimeError``——用户主动发起就该得到明确的失败原因，而不是
             像自动流程那样静默放行。
+        should_abort: 中止判定；传给执行层在文件批次边界收工。
 
     Returns:
         是否可以继续本次任务。``False`` 表示需要用户先处理——要么本次只能全量更新
@@ -202,7 +228,9 @@ async def ensure_game_updated(
         return False
 
     await _report(on_log, f"原神客户端{plan.describe()}")
-    result = await execute_plan(plan, hpatchz=hpatchz, on_progress=on_log)
+    result = await execute_plan(
+        plan, hpatchz=hpatchz, on_progress=on_log, should_abort=should_abort
+    )
 
     if result.success:
         await _report(

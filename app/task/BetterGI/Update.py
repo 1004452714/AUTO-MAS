@@ -27,13 +27,13 @@ from app.models.task import ScriptItem, TaskExecuteBase
 from app.task.proxy_helpers import push_dispatch_log
 from app.utils import get_logger
 
-from .tools.game_update import ensure_game_updated
+from .tools.game_update import ensure_game_updated, task_stopped
 
 logger = get_logger("原神更新 BetterGI")
 
 
 class BetterGIUpdateTask(TaskExecuteBase):
-    """脚本配置页「检查更新」手动触发的一次原神客户端增量更新。
+    """用户页「检查更新」手动触发的一次原神客户端增量更新。
 
     与代理任务启动前的自动更新共用 :func:`ensure_game_updated` 的检查与落盘
     逻辑；手动入口下无法自动完成的情况一律抛错（用户主动发起，不应像自动
@@ -72,6 +72,7 @@ class BetterGIUpdateTask(TaskExecuteBase):
             user_config,
             on_log=self._push_dispatch_log,
             manual=True,
+            should_abort=lambda: task_stopped(self),
         )
         self.cur_user_item.status = "完成"
 
