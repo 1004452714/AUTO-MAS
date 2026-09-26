@@ -20,7 +20,7 @@
 
     build_plan() -> UpdatePlan    只算不做（联网枚举清单，不写盘）
     execute()    -> InstallResult 真正下载 + 落盘 + 写回版本
-    finalize()   -> None          写 game_version / 渠道 / 语音清单
+    finalize()   -> None          写 game_version / 渠道
 
 主干::
 
@@ -80,10 +80,6 @@ __all__ = [
 ]
 
 
-#: 官方启动器默认保留的语音
-DEFAULT_VOICE_LOCALE = "ja-jp"
-
-
 class UpdateKind(str, Enum):
     """本次更新要走的路径。"""
 
@@ -136,12 +132,8 @@ class UpdatePlan:
 
     #: Sophon 主清单信息对
     main_pair: Optional[SophonChunkManifestInfoPair] = None
-    #: Sophon 语音包清单信息对
-    voice_pairs: List[SophonChunkManifestInfoPair] = field(default_factory=list)
     #: 差分补丁清单信息对（kind == SophonPatch 时才有）
     patch_pair: Optional[SophonChunkManifestInfoPair] = None
-    #: 参与本次下载的 matching_field
-    matching_fields: List[str] = field(default_factory=list)
 
     #: 需要下载/校验的资源（kind 为 SophonInstall/Update 时有效）
     assets: List[SophonAsset] = field(default_factory=list)
@@ -255,8 +247,6 @@ class InstallManagerBase:
         self.progress = progress
         self.chunk_thread_count = max(1, min(32, chunk_thread_count))
 
-        #: 本次流程里选中的语音语言（locale code 列表）
-        self.sophon_voice_languages: List[str] = []
         #: 协作式中止判定，透传给下载器与补丁器
         self.should_abort: Optional[Callable[[], bool]] = None
         #: hpatchz 可执行文件路径；None 时按 PATH 查找
@@ -327,9 +317,9 @@ class InstallManagerBase:
         is_preload: bool,
         kind: Optional[UpdateKind] = None,
     ) -> None:
-        """填充 Sophon 计划：取清单、语音清单、判定差分/更新/预下载。
+        """填充 Sophon 计划：取清单、判定差分/更新/预下载。
 
-        写入 ``plan.main_pair`` / ``voice_pairs`` / ``matching_fields`` / ``target_version`` /
+        写入 ``plan.main_pair`` / ``target_version`` /
         ``patch_pair``（差分）/ ``kind``，并按需收集资产（非 dry-run 时）。
 
         Args:
@@ -352,11 +342,6 @@ class InstallManagerBase:
             return
 
         plan.main_pair = pair
-        plan.matching_fields = [self.main_matching_field]
-        plan.voice_pairs = self.get_voice_pairs(pair)
-        plan.matching_fields.extend(
-            voice.matching_field for voice in plan.voice_pairs if voice.matching_field
-        )
         plan.target_version = (
             self.version.preload_version if is_preload else self.version.latest_version
         )
@@ -542,88 +527,11 @@ class InstallManagerBase:
             logger=self.logger,
         )
 
-    def get_voice_pairs(
-        self, pair: SophonChunkManifestInfoPair
-    ) -> List[SophonChunkManifestInfoPair]:
-        """为每个选中的语音语言取对应清单。
-
-        Args:
-            pair: 主清单信息对，作为语音清单的母体。
-
-        Returns:
-            找到的语音清单；不可用的语言被跳过。
-        """
-        results: List[SophonChunkManifestInfoPair] = []
-        for locale in self.resolve_voice_languages(pair):
-            voice_pair = pair.get_other_manifest_info_pair(locale)
-            if not voice_pair.is_found:
-                self.logger.debug("语音包 %s 不可用，跳过", locale)
-                continue
-            results.append(voice_pair)
-        return results
-
-    def resolve_voice_languages(
-        self, pair: Optional[SophonChunkManifestInfoPair] = None
-    ) -> List[str]:
-        """确定本次要下载的语音语言（locale code 列表）。
-
-        Args:
-            pair: 主清单信息对；本实现未使用其字段，仅保留接口兼容，可为 ``None``。
-
-        Returns:
-            本次要更新的语音 locale code（已写回 ``self.sophon_voice_languages``）。
-
-        Note:
-            策略（**会读盘** ``audio_lang_list_path()``）：
-            1. 清单文件存在 -> 逐行经 :meth:`locale_code_from_language_string` 映射；
-            2. 否则用 ``self.sophon_voice_languages``（CLI 传入）；
-            3. 都没有 -> 回退 ``DEFAULT_VOICE_LOCALE``（默认 ``ja-jp``）。
-            ``locale_code_from_language_string`` 是钩子：基类走 locale code，
-            原神覆写为语言全名映射。
-        """
-        languages: List[str] = []
-        path = self.version.audio_lang_list_path()
-        if path:
-            try:
-                with open(path, "r", encoding="utf-8") as handle:
-                    languages = [
-                        self.locale_code_from_language_string(line)
-                        for line in handle.read().splitlines()
-                        if line.strip()
-                    ]
-            except OSError:
-                languages = []
-        languages = [lang for lang in languages if lang]
-        if not languages:
-            languages = list(self.sophon_voice_languages)
-        if not languages:
-            languages = [DEFAULT_VOICE_LOCALE]
-        self.sophon_voice_languages = languages
-        return languages
-
-    def locale_code_from_language_string(self, text: str) -> str:
-        """把语言描述映射成 locale code（钩子，子类可覆写）。
-
-        Args:
-            text: 语言描述文本（清单里的一行）。
-
-        Returns:
-            对应的 locale code（如 ``en-us``）。基类直接 ``strip().lower()``；
-            原神覆写为语言全名（``Chinese`` 等）到 locale code 的映射。
-
-        Note:
-            与 :meth:`games.genshin.GenshinInstaller.language_string_from_locale_code`
-            互为逆函数，但基类不提供逆映射，仅在 Genshin 子类配对实现。
-        """
-        return text.strip().lower()
-
-    # ------------------------------------------------------------ 资产收集
-
     def _collect_assets(self, plan: UpdatePlan, *, is_preload: bool) -> None:
-        """枚举并过滤 Sophon 主/语音清单的资产，写入 ``plan.assets``。
+        """枚举并过滤 Sophon 主清单的资产，写入 ``plan.assets``。
 
         Args:
-            plan: 计划对象，其 ``main_pair`` / ``voice_pairs`` 必须已就绪。
+            plan: 计划对象，其 ``main_pair`` 必须已就绪。
             is_preload: 是否预下载——决定用 ``exclude_matching_field_preload``
                 还是 ``exclude_matching_field_main`` 做排除。
 
@@ -640,7 +548,7 @@ class InstallManagerBase:
             if self.preset_urls
             else []
         )
-        pairs = [plan.main_pair] + plan.voice_pairs
+        pairs = [plan.main_pair]
         assets: List[SophonAsset] = []
         for pair in pairs:
             if pair is None or not pair.is_found:
@@ -735,7 +643,7 @@ class InstallManagerBase:
     # ================================================================== 钩子
 
     def filter_assets(self, assets: List[SophonAsset]) -> List[SophonAsset]:
-        """钩子：过滤主/语音清单资产。
+        """钩子：过滤主清单资产。
 
         Args:
             assets: 待过滤的资产列表。
@@ -760,40 +668,6 @@ class InstallManagerBase:
             过滤后的差分资产（基类原样返回）。
         """
         return assets
-
-    def before_install(self, plan: UpdatePlan) -> None:
-        """安装前扩展点（钩子，子类可覆写）。
-
-        Args:
-            plan: 当前执行计划。
-
-        Note:
-            基类默认什么都不做。子类用途各异：原神做 3.6 语音目录迁移的前置检查，
-            崩铁在要走自研 DeltaPatch 时把 ``pkg_version`` 挪走；执行
-            ``execute`` 时于落盘前调用。
-        """
-        return None
-
-    def write_audio_lang_list(self, languages: Sequence[str]) -> None:
-        """写回 ``audio_lang_*`` 清单（钩子，三游戏各不相同，子类覆写）。
-
-        Args:
-            languages: 要写入的语音 locale code 列表。
-
-        Note:
-            基类按行写文本；拿不到路径时直接跳过（不写盘）。
-            原神把 locale code 映射成语言全名写 ``audio_lang_14``；绝区零额外双写
-            备用短码清单。子类覆写时应保留此跳过语义。
-        """
-        path = self.version.audio_lang_list_path_static()
-        if not path:
-            return
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
-            for language in languages:
-                handle.write(f"{language}\n")
-
-    # ================================================================== 执行
 
     def execute(self, plan: Optional[UpdatePlan] = None) -> InstallResult:
         """按计划真正执行下载、落盘与写回版本。
@@ -833,7 +707,6 @@ class InstallManagerBase:
             )
 
         os.makedirs(self.game_path, exist_ok=True)
-        self.before_install(plan)
         self._reset_progress(plan)
         return self._execute_sophon_patch(plan, result)
 
@@ -912,25 +785,20 @@ class InstallManagerBase:
         )
 
         if result.success:
-            self.finalize(plan)
+            self.finalize()
         return result
 
     # ================================================================== 收尾
 
-    def finalize(self, plan: UpdatePlan) -> None:
+    def finalize(self) -> None:
         """把「已更新」落盘。
-
-        Args:
-            plan: 当前执行计划（提供目标版本与语音清单口径）。
 
         Note:
             这是**唯一**把更新结果写盘的地方：写 ``config.ini`` 的
-            ``game_version`` / channel / sub_channel / cps，并按需写回语音清单，
+            ``game_version`` / channel / sub_channel / cps，
             最后 ``version.reload()``。
         """
         self.version.update_game_version_to_latest(save=True)
-        if self.sophon_voice_languages:
-            self.write_audio_lang_list(self.sophon_voice_languages)
         self.version.reload()
 
     # ================================================================== 清理

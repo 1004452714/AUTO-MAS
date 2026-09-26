@@ -76,8 +76,8 @@ deletefiles）对本包永远不可达，故未收录；全新安装（``SophonI
 新增一款米哈游游戏（如绝区零）只需四步，不改引擎正文：在
 :mod:`~app.services.gi_updater.presets` 的 ``GameKey`` 登记短名并补
 ``(game, region)`` 预设三元组；在 ``games/`` 下仿
-:mod:`~app.services.gi_updater.games.genshin` 写一个模块，子类覆写语音清单、
-``filter_assets`` 等少量钩子并在末尾 ``register(GameSpec(...))``；在
+:mod:`~app.services.gi_updater.games.genshin` 写一个模块，子类覆写
+``filter_assets``、安装态判定等少量钩子并在末尾 ``register(GameSpec(...))``；在
 :mod:`~app.services.gi_updater.games` 追加一行导入完成登记；宿主侧仿
 :mod:`app.services.genshin_updater` 加一个门面。协议层（``sophon`` / ``patch``）、
 下载层与装配层零改动。
