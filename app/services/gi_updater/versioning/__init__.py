@@ -28,7 +28,6 @@ from app.services.gi_updater.versioning.base import (
 )
 from app.services.gi_updater.versioning.genshin import (
     ALTERNATIVE_EXEC_NAME,
-    AUDIO_VOICE_LANGUAGE_LIST,
     GLOBAL_EXEC_NAME,
     GameTypeGenshinVersion,
 )
@@ -38,7 +37,6 @@ __all__ = [
     "GameVersionBase",
     "GAME_STATE_LABELS",
     "GameTypeGenshinVersion",
-    "AUDIO_VOICE_LANGUAGE_LIST",
     "GLOBAL_EXEC_NAME",
     "ALTERNATIVE_EXEC_NAME",
 ]

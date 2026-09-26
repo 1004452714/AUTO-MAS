@@ -44,7 +44,6 @@ GLOBAL_EXEC_NAME = "GenshinImpact.exe"
 ALTERNATIVE_EXEC_NAME = "YuanShen.exe"
 
 #: 原神语音清单里写的语言全名表
-AUDIO_VOICE_LANGUAGE_LIST = ["Chinese", "English(US)", "Japanese", "Korean"]
 
 
 class GameTypeGenshinVersion(GameVersionBase):
@@ -145,15 +144,3 @@ class GameTypeGenshinVersion(GameVersionBase):
     def audio_new_path(self) -> str:
         """3.6 迁移后的新语音目录 ``<Data>/StreamingAssets/AudioAssets``。"""
         return os.path.join(self.game_data_path, "StreamingAssets", "AudioAssets")
-
-    def needs_audio_migration(self) -> bool:
-        """判断是否需要执行 3.6 语音目录迁移（前置）。
-
-        3.6 起原神把语音从 ``StreamingAssets/Audio/GeneratedSoundBanks/Windows``
-        迁到 ``StreamingAssets/AudioAssets``。触发条件：旧目录 `audio_old_path` 仍存在
-        （说明尚未迁移）。
-
-        Returns:
-            旧目录存在为 ``True``，迁移完成后返回 ``False``。
-        """
-        return os.path.isdir(self.audio_old_path)

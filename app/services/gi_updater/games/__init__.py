@@ -94,10 +94,8 @@ def create_updater(
     client: Optional[HttpClient] = None,
     progress: Optional[ProgressBase] = None,
     logger: Any = None,
-    thread_count: int = 4,
     chunk_thread_count: int = 8,
     voice_languages: Optional[List[str]] = None,
-    dry_run: bool = False,
     should_abort: Optional[Callable[[], bool]] = None,
     hdiff_executable: Optional[str] = None,
 ) -> GameUpdater:
@@ -110,10 +108,8 @@ def create_updater(
         client: HTTP 客户端；缺省时新建 ``HttpClient``。
         progress: 进度对象；可为 ``None``。
         logger: 日志对象；缺省时取模块默认 logger。
-        thread_count: 文件级下载线程数（默认 4）。
         chunk_thread_count: 单文件分块下载线程数（默认 8）。
         voice_languages: 要保留的语音 locale code 列表，决定下载哪些语音包。
-        dry_run: 演练模式——只决策/估算，不联网拉资产、不写盘。
         should_abort: 协作式中止判定，下载在资产与数据块边界轮询它；
             ``None`` 表示不可中止。
         hdiff_executable: ``hpatchz`` 可执行文件路径；缺省时按 ``PATH`` 查找。
@@ -136,9 +132,7 @@ def create_updater(
         game_path,
         progress=progress,
         logger=logger,
-        thread_count=thread_count,
         chunk_thread_count=chunk_thread_count,
-        dry_run=dry_run,
     )
     installer.should_abort = should_abort
     installer.hdiff_executable = hdiff_executable

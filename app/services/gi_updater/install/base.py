@@ -73,16 +73,6 @@ __all__ = [
     "InstallManagerBase",
 ]
 
-#: Sophon 清单里可能出现的全部 ``matching_field``
-COMMON_SOPHON_PACKAGE_MATCHING_FIELDS = (
-    "game",
-    "en-us",
-    "zh-tw",
-    "zh-cn",
-    "ko-kr",
-    "ja-jp",
-)
-
 #: 官方启动器默认保留的语音
 DEFAULT_VOICE_LOCALE = "ja-jp"
 
@@ -218,7 +208,7 @@ class InstallResult:
 
 
 class InstallManagerBase:
-    """安装管理基类；三款游戏通过子类覆写少量钩子。"""
+    """安装管理基类；每款游戏通过子类覆写少量钩子。"""
 
     def __init__(
         self,
@@ -230,10 +220,8 @@ class InstallManagerBase:
         *,
         progress: Optional[ProgressBase] = None,
         logger: Any = None,
-        # 下载线程数（默认 4，给界面留出余量）
-        thread_count: int = 4,
+        # 下载线程数（给界面留出余量）
         chunk_thread_count: int = 8,
-        dry_run: bool = False,
     ) -> None:
         """初始化安装管理器。
 
@@ -245,9 +233,7 @@ class InstallManagerBase:
             game_path: 可选，显式覆盖游戏安装目录（仅本次会话，不落盘）。
             progress: 进度回调；可为 ``None``。
             logger: 日志对象；缺省时取模块默认 logger。
-            thread_count: 文件级下载线程数（默认 4）。
             chunk_thread_count: 单文件分块下载线程数（钳制在 1–32）。
-            dry_run: 演练模式——只决策/估算，不联网拉资产、不写盘。
 
         Note:
             仅在传入 ``game_path`` 时调用 ``version.update_game_path(..., save=False)``，
@@ -260,10 +246,7 @@ class InstallManagerBase:
 
         self.client = client or HttpClient(logger=self.logger)
         self.progress = progress
-        self.thread_count = max(1, thread_count)
         self.chunk_thread_count = max(1, min(32, chunk_thread_count))
-        #:；本实现只能由调用方显式置真，无自动降级
-        self.dry_run = dry_run
 
         #: 本次流程里选中的语音语言（locale code 列表）
         self.sophon_voice_languages: List[str] = []
@@ -298,19 +281,18 @@ class InstallManagerBase:
         return self.version.get_state()
 
     def build_plan(self, state: Optional[GameInstallStateEnum] = None) -> UpdatePlan:
-        """只做决策、不做任何下载/写盘（``dry_run`` 也走这里）。
+        """只做决策、不做任何下载/写盘。
 
         Args:
             state: 当前安装状态；为 ``None`` 时内部调用 :meth:`get_state`。
 
         Returns:
             决策结果。无需更新时 ``kind`` 为 ``Noop``；Sophon 链路的
-            差分/资产收集仅在确实需要联网时补资源信息，``dry_run`` 下则跳过资产枚举、
-            只用 ``getBuild`` 的统计值估算大小/文件数。
+            差分/资产收集仅在确实需要联网时补资源信息。
 
         Note:
             本方法「只决策不落盘」；它不下载、不解压、不写 ``config.ini``。
-            非演练的 Sophon 路径会联网 ``getBuild`` 拉清单/资产信息。
+            Sophon 路径会联网 ``getBuild`` 拉清单/资产信息。
         """
         state = state or self.get_state()
         plan = UpdatePlan(state=state)
@@ -395,17 +377,6 @@ class InstallManagerBase:
         if is_preload:
             kind = UpdateKind.SophonPreload
         plan.kind = kind
-
-        if self.dry_run:
-            # 不联网拉清单资产，只用 getBuild 的统计值估算
-            pairs = [pair] + plan.voice_pairs
-            plan.total_size = sum(
-                (p.chunks_info.total_size if p and p.chunks_info else 0) for p in pairs
-            )
-            plan.file_count = sum(
-                (p.chunks_info.files_count if p and p.chunks_info else 0) for p in pairs
-            )
-            return
 
         if kind == UpdateKind.SophonPatch:
             self._collect_patch_assets(plan)
@@ -803,12 +774,12 @@ class InstallManagerBase:
             languages: 要写入的语音 locale code 列表。
 
         Note:
-            基类按行写文本；``dry_run`` 或拿不到路径时直接跳过（不写盘）。
+            基类按行写文本；拿不到路径时直接跳过（不写盘）。
             原神把 locale code 映射成语言全名写 ``audio_lang_14``；绝区零额外双写
             备用短码清单。子类覆写时应保留此跳过语义。
         """
         path = self.version.audio_lang_list_path_static()
-        if not path or self.dry_run:
+        if not path:
             return
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
@@ -886,7 +857,6 @@ class InstallManagerBase:
             chunk_threads=self.chunk_thread_count,
             progress=self.progress,
             logger=self.logger,
-            dry_run=self.dry_run,
             should_abort=self.should_abort,
         )
 
@@ -916,7 +886,6 @@ class InstallManagerBase:
             downloader=self._new_downloader(),
             progress=self.progress,
             logger=self.logger,
-            dry_run=self.dry_run,
             should_abort=self.should_abort,
             hdiff=ExternalHDiffPatcher(self.hdiff_executable or "hpatchz"),
         )
@@ -950,11 +919,8 @@ class InstallManagerBase:
         Note:
             这是**唯一**把更新结果写盘的地方：写 ``config.ini`` 的
             ``game_version`` / channel / sub_channel / cps，并按需写回语音清单，
-            最后 ``version.reload()``。``dry_run`` 时直接跳过（不落盘）。
+            最后 ``version.reload()``。
         """
-        if self.dry_run:
-            return
-
         self.version.update_game_version_to_latest(save=True)
         if self.sophon_voice_languages:
             self.write_audio_lang_list(self.sophon_voice_languages)
@@ -978,7 +944,7 @@ class InstallManagerBase:
             文件做一次遍历只为找几个残留，代价不值。进程被强杀留下的个别
             ``.temp`` 可以手工删，不影响游戏。
         """
-        if not self.game_path or self.dry_run:
+        if not self.game_path:
             return []
         kept: List[str] = []
         for name in ("chunk_auto_mas", "ldiff"):

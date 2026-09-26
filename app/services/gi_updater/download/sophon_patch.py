@@ -77,8 +77,6 @@ __all__ = [
 
 #: HDiff 补丁文件的魔数
 HDIFF_MAGIC = b"HDIFF"
-#: 空文件的 MD5
-BLANK_FILE_MD5 = "d41d8cd98f00b204e9800998ecf8427e"
 
 
 class HDiffUnavailableError(RuntimeError):
@@ -420,7 +418,6 @@ class SophonPatcher:
     hdiff: HDiffPatcher = field(default_factory=ExternalHDiffPatcher)
     progress: Optional[ProgressBase] = None
     logger: Any = None
-    dry_run: bool = False
     #: 协作式中止判定，在每条补丁资产边界轮询
     should_abort: Optional[Callable[[], bool]] = None
 
@@ -442,7 +439,6 @@ class SophonPatcher:
                 client=self.client,
                 progress=self.progress,
                 logger=self.logger,
-                dry_run=self.dry_run,
                 should_abort=self.should_abort,
             )
 
@@ -561,9 +557,6 @@ class SophonPatcher:
         Returns:
             ``True`` 表示写入后文件已完整（校验通过）；否则 ``False``。
         """
-        if self.dry_run:
-            return True
-
         chunk_data = self._fetch_patch_chunk(asset)
         target = _resolve_target_path(self.game_path, asset.target_file_path)
 
@@ -604,9 +597,6 @@ class SophonPatcher:
             ``True`` 表示补丁后文件完整（校验通过）；旧文件缺失/不符或补丁
             失败时降级为整文件下载，仍失败返回 ``False``。
         """
-        if self.dry_run:
-            return True
-
         old_path = _resolve_target_path(self.game_path, asset.original_file_path)
         if not self._is_old_file_usable(old_path, asset):
             # 旧文件缺失或与差分基线不符：hpatchz 必然失败（oldDataSize/oldMd5

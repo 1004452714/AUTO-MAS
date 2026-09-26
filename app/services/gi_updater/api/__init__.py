@@ -44,7 +44,6 @@ from app.services.gi_updater.api.models import (
 )
 from app.services.gi_updater.api.profiles import (
     PROFILES,
-    GameNameType,
     PresetConfig,
     Region,
     SophonChunkUrls,
@@ -58,7 +57,6 @@ __all__ = [
     "load_or_create_device_id",
     "PresetConfig",
     "SophonChunkUrls",
-    "GameNameType",
     "Region",
     "PROFILES",
     "get_profile",
