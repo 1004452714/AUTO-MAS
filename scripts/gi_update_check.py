@@ -1,4 +1,9 @@
-"""只读探测：拉真实清单算出计划，不下载、不写盘（诊断脚本，非 pytest 入口）。"""
+"""只读探测：拉真实清单算出计划，不下载、不写盘（诊断脚本，非 pytest 入口）。
+
+用法：``python scripts/gi_update_check.py [--game gi]``，对所给游戏的两个区服各跑一次。
+探测刻意走 ``dry_run`` 之外的真实路径：演练态会跳过清单收集，文件数与体积都会是
+``getBuild`` 的统计估算而不是真值。
+"""
 
 import asyncio
 import json
@@ -12,19 +17,21 @@ from app.services.gi_updater.common import summarize_size
 from app.services.gi_updater.games import create_updater
 
 
-async def probe(region: str, game_dir: str) -> dict:
-    """按区服算一次更新计划并回报关键字段。
+async def probe(game: str, region: str, game_dir: str) -> dict:
+    """按游戏与区服算一次更新计划并回报关键字段。
 
     Args:
+        game: 游戏短名，如 ``gi``。
         region: ``cn`` / ``global``。
         game_dir: 一个空目录，代表「未安装」的全量场景。
 
     Returns:
         可 JSON 序列化的探测结果。
     """
-    updater = create_updater(region, game_dir)
+    updater = create_updater(game, region, game_dir)
     plan = await asyncio.to_thread(updater.check)
     return {
+        "game": game,
         "region": region,
         "profile": updater.preset.profile_name,
         "state": plan.state.value,
@@ -40,16 +47,28 @@ async def probe(region: str, game_dir: str) -> dict:
     }
 
 
+def _game_arg() -> str:
+    """取 ``--game`` 的值，缺省为原神。"""
+    if "--game" in sys.argv:
+        return sys.argv[sys.argv.index("--game") + 1]
+    return "gi"
+
+
 async def main() -> None:
-    """对两个区服各跑一次只读探测并打印 JSON。"""
+    """对指定游戏的两个区服各跑一次只读探测并打印 JSON。"""
+    game = _game_arg()
     results = []
     with tempfile.TemporaryDirectory() as tmp:
         for region in ("cn", "global"):
             try:
-                results.append(await probe(region, tmp))
+                results.append(await probe(game, region, tmp))
             except Exception as error:  # noqa: BLE001
                 results.append(
-                    {"region": region, "error": f"{type(error).__name__}: {error}"}
+                    {
+                        "game": game,
+                        "region": region,
+                        "error": f"{type(error).__name__}: {error}",
+                    }
                 )
     print(json.dumps(results, ensure_ascii=False, indent=2))
 

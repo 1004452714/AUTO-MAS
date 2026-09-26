@@ -78,7 +78,7 @@ class UpdateAborted(RuntimeError):
 class PercentStyleLogger:
     """把 ``%`` 惰性格式化转发给 loguru 的薄壳。"""
 
-    def __init__(self, name: str = "原神更新") -> None:
+    def __init__(self, name: str = "更新引擎") -> None:
         """绑定一个宿主 logger。
 
         Args:
@@ -126,11 +126,11 @@ class PercentStyleLogger:
 _CACHE: dict[str, PercentStyleLogger] = {}
 
 
-def get_logger(name: str = "原神更新") -> PercentStyleLogger:
+def get_logger(name: str = "更新引擎") -> PercentStyleLogger:
     """取引擎用的 logger（按名字复用同一个实例）。
 
     Args:
-        name: loguru 的模块名，默认整包共用「原神更新」。
+        name: loguru 的模块名；装配层会按游戏传「<游戏名>更新」，缺省为中性名。
 
     Returns:
         :class:`PercentStyleLogger` 实例。

@@ -16,9 +16,10 @@
 #   You should have received a copy of the GNU Affero General Public License
 #   along with AUTO-MAS. If not, see <https://www.gnu.org/licenses/>.
 
-"""装配层：把 ``PresetConfig`` + 版本管理 + 安装编排拼成一套可用的更新器。
+"""装配层：按游戏短名把 ``PresetConfig`` + 版本管理 + 安装编排拼成可用的更新器。
 
-对外只有一个入口 :func:`create_updater`。
+对外只有一个入口 :func:`create_updater`。它不认得具体是哪款游戏——每个游戏的类由
+:mod:`~app.services.gi_updater.games.spec` 的注册表给出，游戏模块在被导入时自行登记。
 """
 
 from __future__ import annotations
@@ -28,18 +29,19 @@ from typing import Any, Callable, List, Optional
 
 from app.services.gi_updater.api import HttpClient, LauncherApi
 from app.services.gi_updater.common import ProgressBase, get_logger
-from app.services.gi_updater.games.genshin import (
-    GameTypeGenshinVersion,
-    GenshinInstaller,
-)
+
+# 导入即登记：每个游戏模块在自己文件末尾调 ``register``；加新游戏就在此追加一行
+from app.services.gi_updater.games import genshin as _genshin  # noqa: F401
+from app.services.gi_updater.games.spec import GameSpec, get_spec
 from app.services.gi_updater.install import InstallManagerBase, UpdatePlan
-from app.services.gi_updater.presets import PresetConfig, get_profile
+from app.services.gi_updater.presets import GameKey, PresetConfig, get_profile
 from app.services.gi_updater.versioning import GameVersionBase
 
 __all__ = [
+    "GameSpec",
     "GameUpdater",
-    "GenshinInstaller",
     "create_updater",
+    "get_spec",
 ]
 
 
@@ -88,6 +90,7 @@ class GameUpdater:
 
 
 def create_updater(
+    game: str = GameKey.Genshin,
     region: str = "cn",
     game_path: Optional[str] = None,
     *,
@@ -100,9 +103,10 @@ def create_updater(
     should_abort: Optional[Callable[[], bool]] = None,
     hdiff_executable: Optional[str] = None,
 ) -> GameUpdater:
-    """按区服装配一整套原神更新器。
+    """按游戏与区服装配一整套更新器。
 
     Args:
+        game: 游戏短名（如 ``gi``），决定用哪一对版本/安装实现与哪份预设。
         region: 区服，``cn`` / ``global``。
         game_path: 游戏安装目录；``None`` 时由版本管理器自行探测。
         profile_dir: 预设/缓存目录；缺省由版本管理器自行决定。
@@ -118,14 +122,15 @@ def create_updater(
     Returns:
         聚合了 ``preset`` / ``version_manager`` / ``installer`` 的门面对象。
     """
-    logger = logger or get_logger()
-    preset = get_profile(region)
+    spec = get_spec(game)
+    logger = logger or get_logger(f"{spec.display_name}更新")
+    preset = get_profile(spec.key, region)
     client = client or HttpClient(logger=logger)
 
-    version_manager = GameTypeGenshinVersion(preset, None, game_path)
+    version_manager = spec.version_cls(preset, None, game_path)
     version_manager.profile_dir = profile_dir
 
-    installer = GenshinInstaller(
+    installer = spec.installer_cls(
         preset,
         version_manager,
         None,

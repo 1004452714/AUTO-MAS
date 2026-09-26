@@ -39,6 +39,7 @@ from typing import Dict, List, Optional, Tuple
 __all__ = [
     "SophonChunkUrls",
     "PresetConfig",
+    "GameKey",
     "Region",
     "PROFILES",
     "get_profile",
@@ -46,8 +47,45 @@ __all__ = [
 
 
 # --------------------------------------------------------------------------- #
-# 枚举（/ LauncherType）
+# 枚举
 # --------------------------------------------------------------------------- #
+
+
+class GameKey:
+    """游戏短名：``PROFILES`` 与 ``games.spec.SPECS`` 共用的键。
+
+    新增一款米哈游游戏时，先在这里登记短名，再补 ``(key, region)`` 预设与
+    ``games/<game>.py`` 的注册。
+    """
+
+    Genshin = "gi"
+
+    #: 已登记的游戏短名；报错与提示用它列可选项
+    KNOWN = (Genshin,)
+
+    #: 用户侧常见写法 -> 注册短名
+    ALIASES = {"genshin": Genshin, "yuanshen": Genshin, "原神": Genshin}
+
+    @classmethod
+    def normalize(cls, value: str) -> str:
+        """把用户给的游戏写法归一化成注册短名。
+
+        Args:
+            value: 短名本身（``gi``），或 :attr:`ALIASES` 里的别名。
+
+        Returns:
+            归一化后的游戏短名。
+
+        Raises:
+            ValueError: 无法识别这个游戏写法时——列出 :attr:`KNOWN` 便于自查。
+        """
+        text = str(value).strip().lower()
+        if text in cls.KNOWN:
+            return text
+        key = cls.ALIASES.get(text)
+        if key is not None:
+            return key
+        raise ValueError(f"未知游戏: {value!r}（可选: {', '.join(cls.KNOWN)}）")
 
 
 class Region:
@@ -275,7 +313,8 @@ def _sophon_urls(base: str) -> SophonChunkUrls:
 def _build_profiles() -> Dict[Tuple[str, str], PresetConfig]:
     """构造模块级 ``PROFILES`` 字典（副作用：填充内置预设）。
 
-    按 ``(游戏短名, 区服)`` 为原神的官服与国际服各建一份 ``PresetConfig``，
+    按 ``(游戏短名, 区服)`` 建一份 ``PresetConfig``；目前只登记了原神的官服与
+    国际服两条。
     并补全 ``launcher_resource_url``（回退为 getGamePackages 端点）。
 
     Returns:
@@ -284,7 +323,7 @@ def _build_profiles() -> Dict[Tuple[str, str], PresetConfig]:
     profiles: Dict[Tuple[str, str], PresetConfig] = {}
 
     # ---------------------------------------------------------------- 原神
-    profiles[("gi", Region.CN)] = PresetConfig(
+    profiles[(GameKey.Genshin, Region.CN)] = PresetConfig(
         profile_name="GICN",
         launcher_id=_CN_LAUNCHER_ID,
         game_id="1Z8W5NHUQb",
@@ -298,9 +337,11 @@ def _build_profiles() -> Dict[Tuple[str, str], PresetConfig]:
         # 5.6 起官方移除 zip 包，本预设强制走 Sophon
         is_force_redirect_to_sophon=True,
     )
-    profiles[("gi", Region.CN)].launcher_resource_chunks_url = _sophon_urls(_CN_DL)
+    profiles[(GameKey.Genshin, Region.CN)].launcher_resource_chunks_url = _sophon_urls(
+        _CN_DL
+    )
 
-    profiles[("gi", Region.GLOBAL)] = PresetConfig(
+    profiles[(GameKey.Genshin, Region.GLOBAL)] = PresetConfig(
         profile_name="GIGlb",
         launcher_id=_GLB_LAUNCHER_ID,
         game_id="gopR6Cufr3",
@@ -313,7 +354,9 @@ def _build_profiles() -> Dict[Tuple[str, str], PresetConfig]:
         downloader_base=_GLB_DL,
         is_force_redirect_to_sophon=True,
     )
-    profiles[("gi", Region.GLOBAL)].launcher_resource_chunks_url = _sophon_urls(_GLB_DL)
+    profiles[
+        (GameKey.Genshin, Region.GLOBAL)
+    ].launcher_resource_chunks_url = _sophon_urls(_GLB_DL)
 
     for preset in profiles.values():
         preset.launcher_resource_url = preset.game_packages_url
@@ -324,10 +367,11 @@ def _build_profiles() -> Dict[Tuple[str, str], PresetConfig]:
 PROFILES: Dict[Tuple[str, str], PresetConfig] = _build_profiles()
 
 
-def get_profile(region: str) -> PresetConfig:
-    """取原神指定区服的预设。
+def get_profile(game: str, region: str) -> PresetConfig:
+    """取指定游戏、指定区服的预设。
 
     Args:
+        game: 游戏短名（如 ``gi``），或 :class:`GameKey` 里登记的别名写法。
         region: 区服，``cn`` / ``global``（也接受 ``官服`` / ``国际服`` 等写法，
             由 :meth:`Region.normalize` 归一化）。
 
@@ -335,10 +379,12 @@ def get_profile(region: str) -> PresetConfig:
         匹配到的 ``PresetConfig``。
 
     Raises:
-        ValueError: 区服无法识别，或该区服没有内置预设时。
+        ValueError: 游戏或区服无法识别，或该组合没有内置预设时。
     """
-    key = ("gi", Region.normalize(region))
+    key = (GameKey.normalize(game), Region.normalize(region))
     if key not in PROFILES:
-        available = ", ".join(sorted(registered for _, registered in PROFILES))
-        raise ValueError(f"原神不支持区服 {key[1]!r}（可选: {available}）")
+        available = ", ".join(sorted(registered for registered, _ in PROFILES))
+        raise ValueError(
+            f"未内置游戏 {key[0]!r} 在区服 {key[1]!r} 的预设（已登记游戏: {available}）"
+        )
     return PROFILES[key]

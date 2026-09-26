@@ -55,7 +55,7 @@ from app.services.gi_updater.common import (
 )
 from app.services.gi_updater.games import create_updater
 from app.services.gi_updater.install import UpdateKind
-from app.services.gi_updater.presets import get_profile
+from app.services.gi_updater.presets import GameKey, get_profile
 from app.utils import get_logger, sanitize_log_message
 from app.utils.hpatchz import ensure_hpatchz
 
@@ -275,7 +275,7 @@ def _resolve_region(game_dir: Path, resource: str) -> str | None:
     found = [
         region
         for _, region in _REGION_BY_LOCALE
-        if _executable_present(game_dir, get_profile(region))
+        if _executable_present(game_dir, get_profile(GameKey.Genshin, region))
     ]
     if len(found) == 1:
         return found[0]
@@ -315,7 +315,7 @@ def _looks_like_genshin_install(game_dir: Path) -> bool:
     if (game_dir / "config.ini").is_file():
         return True
     return any(
-        _executable_present(game_dir, get_profile(region))
+        _executable_present(game_dir, get_profile(GameKey.Genshin, region))
         for _, region in _REGION_BY_LOCALE
     )
 
@@ -453,6 +453,7 @@ async def _run_update(
         hpatchz = "hpatchz"
 
     updater = create_updater(
+        GameKey.Genshin,
         resolved,
         str(game_dir),
         progress=progress,

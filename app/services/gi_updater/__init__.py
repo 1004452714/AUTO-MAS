@@ -47,7 +47,7 @@
 #   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 #   SOFTWARE.
 
-"""原神客户端更新引擎：检查更新 → 下载 → 安装，全程不依赖官方启动器界面。
+"""米哈游客户端更新引擎：检查更新 → 下载 → 安装，全程不依赖官方启动器界面。
 
 按职责分成这些模块，自下而上：
 
@@ -71,12 +71,14 @@ deletefiles）对本包永远不可达，故未收录；全新安装（``SophonI
 一律停手交给官方启动器。要接不支持强制 Sophon 的游戏时，需要补回一条 zip 执行链路、
 多会话分片下载器，以及 ``UpdateKind`` 的 zip 取值与 ``build_plan`` 的链路判定。
 
-新增一款米哈游游戏（如绝区零）的路径：在 :mod:`~app.services.gi_updater.presets`
-加一组 ``(game, region)`` 预设三元组，在 ``games/`` 下仿
-:mod:`~app.services.gi_updater.games.genshin` 写一个模块覆写语音清单与
-``filter_assets`` 等少量钩子，再在 :mod:`~app.services.gi_updater.games` 的装配层
-注册，宿主侧仿 :mod:`app.services.genshin_updater` 加一个门面。
-协议层（``sophon`` / ``patch``）与下载层零改动。
+新增一款米哈游游戏（如绝区零）只需四步，不改引擎正文：在
+:mod:`~app.services.gi_updater.presets` 的 ``GameKey`` 登记短名并补
+``(game, region)`` 预设三元组；在 ``games/`` 下仿
+:mod:`~app.services.gi_updater.games.genshin` 写一个模块，子类覆写语音清单、
+``filter_assets`` 等少量钩子并在末尾 ``register(GameSpec(...))``；在
+:mod:`~app.services.gi_updater.games` 追加一行导入完成登记；宿主侧仿
+:mod:`app.services.genshin_updater` 加一个门面。协议层（``sophon`` / ``patch``）、
+下载层与装配层零改动。
 """
 
 from app.services.gi_updater.games import GameUpdater, create_updater
