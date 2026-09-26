@@ -67,9 +67,8 @@ _VERSION_RE = re.compile(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?$")
 class GameVersion:
     """不可变、可比较的 4 段版本号。
 
-    ：使用 ``field`` 关键字做惰性解析，并重载了
-    ``==`` / ``>`` / ``<`` 等运算符。Python 侧用 ``functools.total_ordering``
-    风格的显式富比较方法实现同样语义。
+    比较走显式富运算符：未安装（``None``）在比较时按全 0 空版本参与，因此
+    「未知」永远排在任何具体版本之前。
     """
 
     major: int = 0
@@ -81,16 +80,10 @@ class GameVersion:
 
     @classmethod
     def parse(cls, value: "str | int | GameVersion | None") -> Optional["GameVersion"]:
-        """宽松解析版本号；无法解析或为空时返回 ``None`` 而非抛异常。
+        """宽松解析版本号：支持 str（如 ``"5.6.0.0"``）、int 与 ``GameVersion``。
 
-         / 隐式转换运算符。
-
-        Args:
-            value: 待解析的值，支持 str（如 ``"5.6.0.0"``）、int、``GameVersion``
-                或 None。空串、``None``、以及无法匹配 ``_VERSION_RE`` 的输入一律返回 ``None``。
-
-        Returns:
-            解析出的 :class:`GameVersion`，或 ``None``（语义上表示「未安装」/「未知」）。
+        空串、``None`` 与匹配不上 ``_VERSION_RE`` 的输入都返回 ``None``（语义上是
+        「未安装」）而不抛异常——版本号读不出来不该拦住整条更新流程。
         """
         if value is None:
             return None
@@ -241,13 +234,7 @@ def _coerce(other: object) -> GameVersion:
     """把比较运算的右操作数转成 GameVersion。
 
     None 或无法解析的值按 ``GameVersion.Empty`` 处理，使「未安装」排在任意
-    具体版本之下（「未知」排在「已安装」之前）。
-
-    Args:
-        other: 比较右操作数，可为 ``GameVersion`` / str / int / None。
-
-    Returns:
-        与 ``other`` 等价的 :class:`GameVersion`（不可解析时退化为全 0 空版本）。
+    具体版本之下（「未知」排在「已安装」之前）。不可解析时退化为全 0 空版本。
     """
     if isinstance(other, GameVersion):
         return other
@@ -493,9 +480,6 @@ class GameVersionBase:
             2. 能从 ``config.ini`` 解析出 `installed_version`（即已记录版本号）；
             3. 候选可执行名中存在一个文件，且体积 ``> MIN_EXECUTABLE_SIZE``（64 KiB）。
 
-        Returns:
-            三者同时满足为 ``True``。
-
         Note:
             可执行文件体积门槛 ``MIN_EXECUTABLE_SIZE = 1 << 16``（64 KiB）
             用来排除残破 / 占位的可执行文件。
@@ -530,9 +514,6 @@ class GameVersionBase:
 
         基类默认只返回 `preset.executable_name` 一个；子类覆写以容纳多客户端
         （如原神的国服 / 国际服互斥双名）。
-
-        Returns:
-            候选可执行文件名（不含路径）。
 
         Note:
             子类覆写时应保持语义：返回的每一个名字都代表「同一游戏的不同客户端」，
