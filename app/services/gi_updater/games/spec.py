@@ -28,8 +28,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Type
+from dataclasses import dataclass, field
+from typing import Dict, Tuple, Type
 
 from app.services.gi_updater.install import InstallManagerBase
 from app.services.gi_updater.presets import GameKey
@@ -47,12 +47,37 @@ class GameSpec:
         display_name: 面向用户的名字，用于日志与报错文案。
         version_cls: 该游戏的版本管理器，负责本地版本与安装态判定。
         installer_cls: 该游戏的安装管理器，覆写语音清单等专属钩子。
+        locale_regions: 区服配置项的中文标签 -> 区服短名，顺序即「自动」的探测顺序，
+            第一项同时是空目录（新装）时的默认区服。
+        executable_regions: 游戏程序文件名（小写）-> 区服短名，供宿主按可执行文件
+            反推区服；同一区服的多个渠道同名文件不必区分，只列能区分的名字。
+        install_marker_files: 判断「这个目录真装了本游戏」的文件名，与可执行文件
+            取并集；只有两者都见不到时宿主才按「路径填错」拦下。
     """
 
     key: str
     display_name: str
     version_cls: Type[GameVersionBase]
     installer_cls: Type[InstallManagerBase]
+    locale_regions: Tuple[Tuple[str, str], ...] = ()
+    executable_regions: Dict[str, str] = field(default_factory=dict)
+    install_marker_files: Tuple[str, ...] = ("config.ini",)
+
+    @property
+    def default_region(self) -> str:
+        """空目录（新装）时按哪个区服算——取 :attr:`locale_regions` 的第一项。"""
+        return self.locale_regions[0][1]
+
+    def region_for_label(self, label: str) -> str:
+        """把区服配置项的标签换成区服短名。
+
+        Args:
+            label: 配置里的区服写法（如 ``官服``）。
+
+        Returns:
+            对应的区服短名；标签不认识时退回最后一个区服，与既有口径一致。
+        """
+        return dict(self.locale_regions).get(label, self.locale_regions[-1][1])
 
 
 SPECS: Dict[str, GameSpec] = {}

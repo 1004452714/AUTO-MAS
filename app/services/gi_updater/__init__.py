@@ -59,10 +59,12 @@
 - :mod:`~app.services.gi_updater.versioning` 版本号、本地/远程版本与安装状态机
 - :mod:`~app.services.gi_updater.install`    计划编排与落盘收尾
 - :mod:`~app.services.gi_updater.games`      各游戏差异化钩子与 :func:`create_updater` 装配
+- :mod:`~app.services.gi_updater.pipeline`   宿主侧编排：挪出事件循环、进度转日志、三道门禁
 
-本包**全同步**（urllib + 线程 + 阻塞文件 IO），不 import ``app.core``/``app.api``，
-可以脱离宿主单独导入与自测；异步边界与宿主接线在
-:mod:`app.services.genshin_updater` 门面里做。
+除 ``pipeline`` 之外本包**全同步**（urllib + 线程 + 阻塞文件 IO），不 import
+``app.core`` / ``app.api``，可以脱离宿主单独导入与自测。``pipeline`` 是宿主侧的异步
+编排层，负责把同步引擎挪出事件循环、把进度转成调度台日志、并补上只有宿主才该管的
+三道门禁；一款游戏的门面只做「钉自己的短名」这一件事。
 
 只实现 Sophon 差分一条执行链路：原神自 5.6 起官方不再下发 zip 分包，两个区服预设
 都置 ``is_force_redirect_to_sophon``，传统 zip 链路（下载分包 → 解压 → hdiff →
