@@ -258,37 +258,52 @@ def _stat_size(path: str) -> int:
         return -1
 
 
+#: 一个文件本轮的预判结论
+_VERDICT_READY = "ready"  #: 目标尺寸已对上，本轮会被复核跳过
+_VERDICT_FULL = "full"  #: 基线打不出补丁，预计按整文件重建
+_VERDICT_DIFF = "diff"  #: 照差分取那一段
+
+
 async def summarize_assets(
     assets: Sequence[PatchAsset], game_path: str
 ) -> AssetSummary:
     """把待处理明细压成体量统计。
 
-    体积按每个文件一次 ``getsize`` 预测降级与已就绪：只看尺寸不算 MD5。宁可把门禁估得
-    偏大，也不能在下载跑到一半时发现要下的其实是整包。
+    每个文件只看一次 ``getsize`` 序列，得出**一个**结论（按优先级）：
+
+    :data:`_VERDICT_READY`
+        目标文件的尺寸已经对上 —— 本轮会被 :func:`apply_asset` 的复核跳过，不计流量；
+    :data:`_VERDICT_FULL`
+        不是 ready、是补丁类、且基线文件的尺寸对不上 —— 预计打不出补丁，按整文件重建；
+    :data:`_VERDICT_DIFF`
+        其余 —— 照差分取那一段。
+
+    三态互斥，所以不会出现「1150 个已就绪」与「待下载 40 GiB」同时成立：早先这里算的是
+    两面独立的标志，一个内容已经是新版本的文件既被判成要整包重下（尺寸 ≠ 基线）又被判成
+    已就绪（尺寸 = 目标），待下载量按前者计，凭空多出整包的量。
     """
 
-    def inspect(asset: PatchAsset) -> Tuple[bool, bool]:
-        """返回 ``(基线已不可用, 目标体积已对上)``。"""
-        unusable = asset.is_patch and (
+    def inspect(asset: PatchAsset) -> Tuple[str, int]:
+        """给出这一个文件的结论与要从网络取的字节数。"""
+        if _stat_size(safe_join(game_path, asset.name)) == asset.target_size:
+            return _VERDICT_READY, 0
+        if asset.is_patch and (
             _stat_size(safe_join(game_path, asset.original_name)) != asset.original_size
-        )
-        ready = _stat_size(safe_join(game_path, asset.name)) == asset.target_size
-        return unusable, ready
+        ):
+            return _VERDICT_FULL, asset.target_size
+        return _VERDICT_DIFF, asset.patch_length
 
     verdicts = await asyncio.gather(
         *(asyncio.to_thread(inspect, asset) for asset in assets)
     )
     return AssetSummary(
         file_count=len(assets),
-        download_size=sum(
-            asset.target_size if unusable else asset.patch_length
-            for asset, (unusable, _) in zip(assets, verdicts)
-        ),
+        download_size=sum(size for _, size in verdicts),
         patch_count=sum(1 for asset in assets if asset.is_patch),
         copyover_count=sum(1 for asset in assets if not asset.is_patch),
         largest_target=max((asset.target_size for asset in assets), default=0),
-        downgraded=sum(1 for unusable, _ in verdicts if unusable),
-        ready=sum(1 for _, ready in verdicts if ready),
+        downgraded=sum(1 for verdict, _ in verdicts if verdict == _VERDICT_FULL),
+        ready=sum(1 for verdict, _ in verdicts if verdict == _VERDICT_READY),
     )
 
 
