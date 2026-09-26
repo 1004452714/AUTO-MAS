@@ -33,7 +33,11 @@ from app.services.gi_updater.common import ProgressBase, get_logger
 # 导入即登记：每个游戏模块在自己文件末尾调 ``register``；加新游戏就在此追加一行
 from app.services.gi_updater.games import genshin as _genshin  # noqa: F401
 from app.services.gi_updater.games.spec import GameSpec, get_spec
-from app.services.gi_updater.install import InstallManagerBase, UpdatePlan
+from app.services.gi_updater.install import (
+    InstallManagerBase,
+    UpdateKind,
+    UpdatePlan,
+)
 from app.services.gi_updater.presets import GameKey, PresetConfig, get_profile
 from app.services.gi_updater.versioning import GameVersionBase
 
@@ -83,10 +87,29 @@ class GameUpdater:
         """检查更新：联网拉元数据并算出计划，不下载、不写盘。
 
         Returns:
-            计划的完整结果（含 ``kind`` / 目标版本 / 资产清单等）。
+            计划的完整结果（含 ``kind`` / 目标版本 / 资产清单等）。联网问不出
+            结论时不抛异常，而是给出 ``kind=Unknown`` 并带上原因。
+
+        Note:
+            兜住的是协议层：HTTP 失败、响应信封不是对象、``retcode`` 非 0、清单
+            缺项、zstd 与 protobuf 解不开。这些都只说明「这次问不出来」，不代表
+            用户的客户端坏了，也不该让调度任务失败——区服写错在进入本方法之前
+            就已经报错，不会被这里吞掉。
         """
-        self.refresh()
-        return self.installer.build_plan()
+        try:
+            self.refresh()
+            return self.installer.build_plan()
+        except Exception as error:  # noqa: BLE001
+            self.installer.logger.warning(
+                "问不出该怎么更新，本轮按无法判定处理: {}: {}",
+                type(error).__name__,
+                error,
+            )
+            return UpdatePlan(
+                kind=UpdateKind.Unknown,
+                source_version=self.version_manager.installed_version,
+                message=f"{type(error).__name__}: {error}",
+            )
 
 
 def create_updater(

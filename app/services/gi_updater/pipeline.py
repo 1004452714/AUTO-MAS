@@ -31,6 +31,10 @@
   交给官方启动器——无人值守的调度任务绝不该顺手吃掉几十 GB 整包流量。
 - **磁盘余量**：差分也可能不小，空间不够要提前停，不能让下载在半路写爆磁盘。
 
+三道门禁都建立在「问得出该怎么更新」之上。联网问不出结论（协议异常、清单缺项、
+清单解不开）算**无法判定**：放行，让专项照常启动，原因只留 app.log——查不到是
+我这边的能力问题，不该拦住用户。
+
 取消只来自更新时限：到点往中止标志里置位，下载线程在每个数据块边界协作式收工；
 中止不回滚已落盘的合法文件，也不写 ``config.ini``，重开就是续传。时限到点算一次
 任务失败（要用户先看一眼为什么没更上），不是静默放过。
@@ -89,6 +93,7 @@ _KIND_LABELS = {
     UpdateKind.SophonUpdate.value: "差异比对更新",
     UpdateKind.SophonPreload.value: "预下载下一版本",
     UpdateKind.Noop.value: "无需更新",
+    UpdateKind.Unknown.value: "无法判定",
 }
 
 
@@ -398,7 +403,8 @@ async def update_client(
     else:
         result = await runner
 
-    if result.success:
+    # 「无法判定」只是一次问不出来，记进复用缓存会把接下来十分钟都判成跳过
+    if result.success and result.kind != UpdateKind.Unknown.value:
         _remember(key, result)
     else:
         with _cache_lock:
@@ -481,6 +487,17 @@ async def _run_update(
         # 第一步只算不做：联网枚举清单，得到要下多少、是差分还是整包
         plan = await asyncio.to_thread(updater.check)
         summary = _summarize_plan(plan)
+        if plan.kind == UpdateKind.Unknown:
+            # 一次问不出结论不代表用户的客户端有问题，更不该拦住专项启动：留一行
+            # app.log 供排查，联网恢复的下一轮自会重新判定
+            _note(f"无法判定{display}客户端要不要更新，本轮跳过：{plan.message}")
+            return UpdateResult(
+                success=True,
+                noop=True,
+                message=f"无法判定是否需要更新：{plan.message}",
+                local_version=summary["local_version"],
+                kind=plan.kind.value,
+            )
         if plan.kind == UpdateKind.Noop:
             # 常态结论：只留 app.log，不刷任务日志
             _note(f"{display}客户端已是最新（{summary['local_version'] or '?'}）")

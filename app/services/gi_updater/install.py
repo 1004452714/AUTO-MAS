@@ -93,6 +93,8 @@ class UpdateKind(str, Enum):
     SophonPreload = "sophon-preload"
     #: 无需动作
     Noop = "noop"
+    #: 联网问不出结论（协议异常、清单缺项、清单解不开），由宿主按「无法判定」放行
+    Unknown = "unknown"
 
 
 @dataclass
@@ -147,6 +149,8 @@ class UpdatePlan:
     file_count: int = 0
     #: 差分链路的磁盘占用与本轮待下量估算（``kind == SophonPatch`` 时才有）
     space_need: Optional[PatchSpaceNeed] = None
+    #: 面向用户的一句话结论：``kind == Unknown`` 时是查不出的原因
+    message: str = ""
 
     @property
     def is_preload(self) -> bool:
@@ -162,9 +166,9 @@ class UpdatePlan:
         """是否需要真正执行下载/写盘动作。
 
         Returns:
-            ``kind != Noop`` 时为 True；Noop 表示无需更新。
+            ``kind`` 既不是 ``Noop`` 也不是 ``Unknown`` 时为 True。
         """
-        return self.kind != UpdateKind.Noop
+        return self.kind not in (UpdateKind.Noop, UpdateKind.Unknown)
 
     def describe(self) -> str:
         """生成给人看的一行摘要。
