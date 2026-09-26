@@ -1674,6 +1674,18 @@ export default {
     bettergiGenshinUpdate: '起動前に原神クライアントを更新',
     bettergiGenshinUpdateHint:
       'タスクがゲームを起動する前に、MAS が公式の増分パッチを確認・適用します（公式ランチャーは不要）。パッチが無い場合（新規インストール／ファイル単位の全量比較）は停止し、公式ランチャーでの更新を促します。Bサーバーは公式ランチャーをご利用ください',
+    bettergiCheckUpdateTitle: '原神クライアントの更新を確認',
+    bettergiUpdateUnsupportedHint:
+      '官服と国際服クライアント（アジア／ヨーロッパ／アメリカ／港澳台）のみ対応しています。Bサーバーは公式ランチャーをご利用ください',
+    bettergiUpdateProgressTitle: '原神クライアント更新の進捗',
+    bettergiWillBeUpdated:
+      'このユーザーが使う原神クライアントを確認し、公式の差分パッケージを適用します。数 GB のダウンロードが発生する場合があるため、ゲームが起動していないことを確認してください',
+    bettergiUpdateFailed: '原神の更新に失敗しました: {p0}',
+    bettergiUpdateTask: '原神の更新タスクが終了しました',
+    bettergiUpdateTimed: '原神の更新がタイムアウトしたため、自動的に停止しました',
+    bettergiUpdateConnecting: '更新タスクに接続しています...',
+    bettergiUpdateStartFailed: '原神の更新を開始できませんでした',
+    bettergiUpdateStopFailed: '原神の更新を停止できませんでした',
     bettergiCloseGameOnFinishHint: 'タスクの実行が終わったときにゲームを終了するかどうか',
     bettergiRetryLimitHint: 'この回数を超えても失敗する場合は中止します',
     bettergiRunTimeoutHint: 'ログが長時間更新されない場合はタイムアウトと判定します',
