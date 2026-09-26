@@ -19,7 +19,6 @@
 """下载层：protobuf/zstd 解码、Sophon 清单与差分补丁。"""
 
 from app.services.gi_updater.download.protobuf import (
-    ProtoMessage,
     SophonAssetChunk,
     SophonAssetProperty,
     SophonManifestProto,
@@ -27,9 +26,11 @@ from app.services.gi_updater.download.protobuf import (
     SophonPatchAssetProperty,
     SophonPatchChunk,
     SophonPatchProto,
+    SophonUnusedAssetFile,
+    SophonUnusedAssetInfo,
+    SophonUnusedAssetProperty,
     parse_sophon_manifest,
     parse_sophon_patch,
-    read_message,
 )
 from app.services.gi_updater.download.sophon import (
     SophonAsset,
@@ -57,7 +58,6 @@ from app.services.gi_updater.download.zstd import (
 )
 
 __all__ = [
-    "ProtoMessage",
     "SophonAssetChunk",
     "SophonAssetProperty",
     "SophonManifestProto",
@@ -65,9 +65,11 @@ __all__ = [
     "SophonPatchAssetProperty",
     "SophonPatchChunk",
     "SophonPatchProto",
+    "SophonUnusedAssetFile",
+    "SophonUnusedAssetInfo",
+    "SophonUnusedAssetProperty",
     "parse_sophon_manifest",
     "parse_sophon_patch",
-    "read_message",
     "ZstdError",
     "decompress",
     "iter_decompress",
