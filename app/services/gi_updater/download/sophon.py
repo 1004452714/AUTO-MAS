@@ -43,7 +43,7 @@ import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, List, Optional
 
 from app.services.gi_updater.api.client import HttpClient
 from app.services.gi_updater.api.models import SophonManifestBuildBranch
@@ -572,12 +572,10 @@ class SophonDownloader:
     """把 Sophon 清单里的 asset 落到磁盘。"""
 
     client: HttpClient
-    #: chunk 级并发（默认 ``min(8, CPU)``，按 ``thread_count/2`` clamp 到 2..32）
+    #: chunk 级并发（调用方传入，钳制在 1–32）
     chunk_threads: int = 8
     progress: Optional[ProgressBase] = None
     logger: Any = None
-    #: dry-run：只统计，不写盘不下载
-    dry_run: bool = False
     #: 协作式中止判定：在资产与数据块边界轮询，返回真即抛 ``UpdateAborted``
     should_abort: Optional[Callable[[], bool]] = None
 
@@ -594,19 +592,6 @@ class SophonDownloader:
         """
         if self.should_abort is not None and self.should_abort():
             raise UpdateAborted("更新已中止")
-
-    # ---------------------------------------------------------------- 清单
-
-    def fetch_assets(self, pair: SophonChunkManifestInfoPair) -> List[SophonAsset]:
-        """拉取清单并解析出资产列表（``enumerate_assets`` 的便捷封装）。
-
-        Args:
-            pair: 清单/分片信息对。
-
-        Returns:
-            ``SophonAsset`` 列表。
-        """
-        return SophonManifest.enumerate_assets(self.client, pair, logger=self.logger)
 
     # ---------------------------------------------------------------- 单文件
 
@@ -634,9 +619,6 @@ class SophonDownloader:
             return False
 
         target = _resolve_target_path(game_path, asset.asset_name)
-        if self.dry_run:
-            return True
-
         os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
 
         if self._is_asset_complete(target, asset):
@@ -751,49 +733,6 @@ class SophonDownloader:
             for block in iter(lambda: handle.read(1 << 20), b""):
                 digest.update(block)
         return digest.hexdigest().lower() == asset.asset_hash.lower()
-
-    # ---------------------------------------------------------------- 批量
-
-    def download_assets(
-        self,
-        assets: Iterable[SophonAsset],
-        game_path: str,
-        *,
-        file_threads: int = 4,
-        verify: bool = True,
-    ) -> Dict[str, bool]:
-        """并行下载多个 asset（按文件维度再开一层并发）。
-
-        Args:
-            assets: 待下载的资产可迭代对象。
-            game_path: 游戏根目录。
-            file_threads: 文件级并发数，默认 4。
-            verify: 每个文件写入后是否校验 MD5。
-
-        Returns:
-            资产名 → 成功布尔的字典（单文件异常被捕获并记为 ``False``，
-            不会导致整体中断）。
-
-        Note:
-            目录类资产会被跳过（不参与下载）。
-        """
-        asset_list = [asset for asset in assets if not asset.is_directory]
-        results: Dict[str, bool] = {}
-
-        with ThreadPoolExecutor(max_workers=max(1, file_threads)) as pool:
-            futures = {
-                pool.submit(self.download_asset, asset, game_path, verify=verify): asset
-                for asset in asset_list
-            }
-            for future in as_completed(futures):
-                self._check_abort()
-                asset = futures[future]
-                try:
-                    results[asset.asset_name] = future.result()
-                except Exception as error:  # noqa: BLE001
-                    self.logger.error("下载 %s 失败：%s", asset.asset_name, error)
-                    results[asset.asset_name] = False
-        return results
 
 
 def _resolve_target_path(game_path: str, asset_name: str) -> str:
