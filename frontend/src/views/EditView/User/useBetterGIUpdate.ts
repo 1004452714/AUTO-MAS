@@ -140,6 +140,12 @@ export function useBetterGIUpdate(getUserId: () => string) {
       }
       updateModal.running = true
       updateSession.taskId = response.taskId
+      if (!updateModal.open) {
+        // 请求在途时用户已关掉弹窗：任务已启动但无处展示进度，直接把它停掉
+        updateModal.running = false
+        await stopSession()
+        return
+      }
       errored = false
       updateSession.subscriptionIds = [
         subscribe({ id: response.taskId, type: WS_TASK_LOG_UPDATED }, wsMessage => {
@@ -159,7 +165,13 @@ export function useBetterGIUpdate(getUserId: () => string) {
         }),
         subscribe({ id: response.taskId, type: WS_TASK_COMPLETED }, () => {
           if (!errored) {
-            message.success(t('edit.bettergiUpdateTask'))
+            // 后端已是最新时不做任何下载，日志以「无需更新」收尾；此时提示无需更新，
+            // 而不是成功样式的「任务已结束」（会被读成更新成功）。字面量匹配后端日志
+            if (updateModal.log.includes('无需更新')) {
+              message.info(t('edit.bettergiUpdateUpToDate'))
+            } else {
+              message.success(t('edit.bettergiUpdateTask'))
+            }
           }
           updateModal.running = false
           updateModal.open = false

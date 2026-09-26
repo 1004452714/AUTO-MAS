@@ -42,6 +42,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -49,6 +50,7 @@ from app.models.config import BetterGIConfig, BetterGIUserConfig
 from app.services.genshin_updater import (
     KIND_LABELS,
     UpdateKind,
+    cleanup_temp_dir,
     execute_plan,
     plan_update,
 )
@@ -157,8 +159,13 @@ async def ensure_game_updated(
     plan = await plan_update(game_exe.parent, region=region)
 
     if plan.kind is UpdateKind.NOOP:
+        # 版本已追平，上次失败残留的续传流水账不再可信，顺手清掉
+        await asyncio.to_thread(cleanup_temp_dir, game_exe.parent)
         if manual:
-            await _report(on_log, f"原神客户端已是最新（{plan.local_version or '?'}）")
+            await _report(
+                on_log,
+                f"当前为最新版本（{plan.local_version or '?'}），无需更新",
+            )
         else:
             logger.info("原神客户端已是最新（{}）", plan.local_version)
         return True

@@ -17,8 +17,8 @@
 #   along with AUTO-MAS. If not, see <https://www.gnu.org/licenses/>.
 #
 #   第三方来源声明：本模块按上游公开源码所描述的流程与协议用 Python 重新实现，
-#   不包含其源文件副本。Sophon 协议定义与流程来自下列 MIT 项目，许可原文见本目录
-#   的 LICENSE.Sophon.md：
+#   不包含其源文件副本。Sophon 协议定义与流程来自下列 MIT 项目（许可均随上游仓库
+#   发行，本目录不另附原文）：
 #
 #   - CollapseLauncher/Collapse        https://github.com/CollapseLauncher/Collapse
 #   - Hi3Helper.Sophon                 https://github.com/CollapseLauncher/Hi3Helper.Sophon
@@ -60,6 +60,7 @@ from typing import Any
 import httpx
 import zstandard
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+from google.protobuf.message import DecodeError
 
 from app.utils import get_logger
 
@@ -161,7 +162,7 @@ def get_region_preset(region: str) -> RegionPreset:
 # 生成物把 schema 编译成不可读的序列化字节，评审与后续维护都得先装工具链；
 # 显式写出字段号反而能逐条对照上游 ``.proto``。
 #
-# 上游原始定义（MIT，见 LICENSE.Sophon.md）：
+# 上游原始定义（MIT，Hi3Helper.Sophon 项目，见上方第三方来源声明）：
 #
 #   message SophonManifestProto { repeated SophonManifestAssetProperty Assets = 1; }
 #   message SophonManifestAssetProperty {
@@ -451,6 +452,8 @@ class PatchAsset:
     patch_length: int
     #: 打补丁前的旧文件相对路径；CopyOver 时为空
     original_name: str = ""
+    #: 旧文件应有的 MD5；打补丁前校验，基线不符就停手
+    original_md5: str = ""
 
 
 @dataclass(frozen=True)
@@ -622,6 +625,9 @@ async def _request(
     except ValueError as error:
         raise UpdaterError(f"响应不是合法 JSON: {url}") from error
 
+    if not isinstance(payload, dict):
+        # 响应包封按对象解析；数组/标量一律视作协议异常
+        raise UpdaterError(f"响应不是 JSON 对象: {url}")
     retcode = payload.get("retcode")
     if retcode not in (0, None):
         raise UpdaterError(
@@ -630,12 +636,15 @@ async def _request(
     return payload
 
 
-async def _request_bytes(client: httpx.AsyncClient, url: str) -> bytes:
+async def _request_bytes(
+    client: httpx.AsyncClient, url: str, *, timeout: float | None = None
+) -> bytes:
     """下载一份清单原始字节。
 
     Args:
         client: 复用的 HTTP 客户端。
         url: 清单地址。
+        timeout: 覆盖 client 默认超时；清单体积大，用更宽的限。
 
     Returns:
         原始字节。
@@ -644,7 +653,7 @@ async def _request_bytes(client: httpx.AsyncClient, url: str) -> bytes:
         UpdaterError: 网络失败或非 200 时。
     """
     try:
-        response = await client.get(url)
+        response = await client.get(url, timeout=timeout)
         response.raise_for_status()
     except httpx.HTTPError as error:
         raise UpdaterError(f"下载清单失败 {url}: {error}") from error
@@ -663,7 +672,11 @@ def _decompress(data: bytes, *, compressed: bool) -> bytes:
     """
     if not compressed:
         return data
-    return zstandard.ZstdDecompressor().decompress(data, max_output_size=0)
+    try:
+        return zstandard.ZstdDecompressor().decompress(data, max_output_size=0)
+    except zstandard.ZstdError as error:
+        # ZstdError 不在 UpdaterError 链上，不接住会从 plan_update 逃逸成任务崩溃
+        raise UpdaterError(f"清单解压失败: {error}") from error
 
 
 def _package_info(branch: dict[str, Any], preset: RegionPreset) -> PackageInfo:
@@ -770,7 +783,7 @@ def _find_manifest_entry(
     Returns:
         清单条目；没有时返回 ``None``。
     """
-    for entry in payload.get("data", {}).get("manifests", []):
+    for entry in (payload.get("data") or {}).get("manifests", []):
         if str(entry.get("matching_field") or "").casefold() == matching_field:
             return entry
     return None
@@ -865,7 +878,7 @@ async def fetch_manifest_bytes(client: httpx.AsyncClient, ref: ManifestRef) -> b
         解压后的 protobuf 字节。
     """
     url = f"{ref.manifest_url_prefix.rstrip('/')}/{ref.manifest_id}"
-    raw = await _request_bytes(client, url)
+    raw = await _request_bytes(client, url, timeout=_MANIFEST_TIMEOUT)
     return _decompress(raw, compressed=ref.manifest_compressed)
 
 
@@ -879,7 +892,10 @@ def parse_manifest_assets(data: bytes) -> Any:
         ``SophonManifestProto`` 消息。
     """
     message = _SophonManifestProto()
-    message.ParseFromString(data)
+    try:
+        message.ParseFromString(data)
+    except DecodeError as error:
+        raise UpdaterError(f"主清单解析失败: {error}") from error
     return message
 
 
@@ -893,7 +909,10 @@ def parse_patch_manifest(data: bytes) -> Any:
         ``SophonPatchProto`` 消息。
     """
     message = _SophonPatchProto()
-    message.ParseFromString(data)
+    try:
+        message.ParseFromString(data)
+    except DecodeError as error:
+        raise UpdaterError(f"差分清单解析失败: {error}") from error
     return message
 
 
@@ -962,6 +981,7 @@ def build_patch_assets(
                 patch_offset=int(chunk.PatchOffset),
                 patch_length=int(chunk.PatchLength),
                 original_name=original_name,
+                original_md5=str(chunk.OriginalFileMd5),
             )
         )
 
@@ -1168,6 +1188,12 @@ _DISK_MARGIN_BYTES = 2 * 1024**3
 #: 单次差分分片请求的超时（秒）
 _CHUNK_TIMEOUT = 120.0
 
+#: 单次清单下载的超时（秒）；清单可达数十 MB，比元数据查询宽
+_MANIFEST_TIMEOUT = 300.0
+
+#: 单次 hpatchz 调用的超时（秒）；正常远快于此，挂住即视为失败
+_HPATCHZ_TIMEOUT = 600.0
+
 #: 进度行的最小间隔（秒）
 _PROGRESS_INTERVAL = 1.0
 
@@ -1210,6 +1236,18 @@ def game_dir_lock(game_dir: Path) -> asyncio.Lock:
         lock = asyncio.Lock()
         _dir_locks[key] = lock
     return lock
+
+
+def cleanup_temp_dir(game_dir: Path) -> None:
+    """清掉游戏目录里的中间产物目录。
+
+    流水账只对「同一基线 -> 同一目标」的续传有意义；版本已追平（NOOP）或
+    更新被官方启动器接管后就不再可信，留着只会污染目录。
+
+    Args:
+        game_dir: 游戏安装目录。
+    """
+    shutil.rmtree(game_dir / _TEMP_DIR_NAME, ignore_errors=True)
 
 
 def safe_relative(name: str) -> Path:
@@ -1275,6 +1313,26 @@ def _md5_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+async def _target_is_current(target: Path, asset: PatchAsset) -> bool:
+    """目标文件是否已是差分要更新到的内容。
+
+    先比体积（近乎免费），一致才算整文件 MD5；两处都在线程里跑，不占事件循环。
+
+    Args:
+        target: 目标文件的绝对路径。
+        asset: 待处理明细（带目标体积与 MD5）。
+
+    Returns:
+        体积与 MD5 都与目标一致时为真；文件不存在按「不一致」处理。
+    """
+    if not await asyncio.to_thread(target.is_file):
+        return False
+    stat = await asyncio.to_thread(target.stat)
+    if stat.st_size != asset.target_size:
+        return False
+    return await asyncio.to_thread(_md5_file, target) == asset.target_md5
+
+
 def _run_hpatchz(exe: Path, old: Path, diff: Path, out: Path) -> None:
     """调 ``hpatchz`` 把差分打到旧文件上，产出新文件。
 
@@ -1285,12 +1343,16 @@ def _run_hpatchz(exe: Path, old: Path, diff: Path, out: Path) -> None:
         out: 产出的新文件。
 
     Raises:
-        UpdaterError: 子进程返回非零时。
+        UpdaterError: 子进程返回非零或超时时。
     """
-    result = subprocess.run(
-        [str(exe), "-f", str(old), str(diff), str(out)],
-        capture_output=True,
-    )
+    try:
+        result = subprocess.run(
+            [str(exe), "-f", str(old), str(diff), str(out)],
+            capture_output=True,
+            timeout=_HPATCHZ_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise UpdaterError(f"hpatchz 超时（{_HPATCHZ_TIMEOUT} 秒）: {out}") from error
     if result.returncode != 0:
         detail = result.stderr.decode("utf-8", "replace").strip()
         raise UpdaterError(f"hpatchz 失败（{result.returncode}）: {detail[-200:]}")
@@ -1333,13 +1395,36 @@ def _journal_path(temp_dir: Path) -> Path:
     return temp_dir / _JOURNAL_NAME
 
 
-def _load_journal(temp_dir: Path) -> set[str]:
-    """读出已完成文件名单。"""
+def _load_journal(temp_dir: Path, expected_key: str) -> set[str]:
+    """读出已完成文件名单；流水账不属于本次计划时整份作废。
+
+    Args:
+        temp_dir: 中间产物目录。
+        expected_key: 本次计划的标识（基线版本 -> 目标版本）。流水账是
+            「哪些文件已到目标内容」的记录，跨了版本就不再可信：比如上次
+            中止后用户改用官方启动器把游戏更到了中间版本，旧名单会把没更新
+            的文件当成已完成，静默产出混装客户端。
+
+    Returns:
+        本次计划下已完成文件的相对路径集合。
+    """
+    journal = _journal_path(temp_dir)
     try:
-        text = _journal_path(temp_dir).read_text(encoding="utf-8", errors="replace")
+        lines = journal.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return set()
-    return {line.strip() for line in text.splitlines() if line.strip()}
+    if not lines or lines[0].strip() != expected_key:
+        # 键不符即整份作废：删掉重记，避免旧名单污染本次进度
+        journal.unlink(missing_ok=True)
+        return set()
+    return {line.strip() for line in lines[1:] if line.strip()}
+
+
+def _start_journal(temp_dir: Path, key: str) -> None:
+    """确保流水账存在且首行是本次计划的标识。"""
+    journal = _journal_path(temp_dir)
+    if not journal.exists():
+        journal.write_text(key + "\n", encoding="utf-8")
 
 
 def _append_journal(temp_dir: Path, name: str) -> None:
@@ -1356,12 +1441,16 @@ async def _apply_asset(
     hpatchz: Path,
     diff_url_prefix: str,
 ) -> int:
-    """处理一个文件：取差分 → 校验 → 同卷原子替换。
+    """处理一个文件：取差分 → 校验 → 同卷原子替换 → 记流水账。
+
+    流水账在 ``os.replace`` 成功后立刻补记：批次里其他文件失败或进程被硬杀时，
+    已落盘的文件不能被重试重做——原位补丁（``original_name`` 与 ``name`` 同路径）
+    重做会拿已经是新内容的目标文件当旧文件，产物校验必败，更新从此卡死。
 
     Args:
         client: 复用的 HTTP 客户端。
         game_dir: 游戏安装目录。
-        temp_dir: 中间产物目录（存差分数据）。
+        temp_dir: 中间产物目录（存差分数据与流水账）。
         asset: 待处理明细。
         hpatchz: ``hpatchz`` 可执行文件路径。
         diff_url_prefix: 差分分片基址。
@@ -1374,6 +1463,13 @@ async def _apply_asset(
         PathUnsafeError: 路径不可信时。
     """
     target = resolve_within(game_dir, asset.name)
+    # 自愈检查：目标已是本次要更新到的内容（上次中断前落盘、流水账没来得及记），
+    # 直接跳过。不查就重做的话，原位补丁会拿新文件当旧文件打补丁，产物校验必败，
+    # 更新从此卡死
+    if await _target_is_current(target, asset):
+        _append_journal(temp_dir, asset.name)
+        return 0
+
     url = f"{diff_url_prefix.rstrip('/')}/{asset.patch_name}"
     data = await _fetch_range(client, url, asset.patch_offset, asset.patch_length)
 
@@ -1381,29 +1477,43 @@ async def _apply_asset(
     staging = target.with_name(f"{target.name}.mas-new")
     await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
 
-    if asset.method == METHOD_COPYOVER:
-        # 分片本身就是新内容
-        actual = await asyncio.to_thread(lambda: hashlib.md5(data).hexdigest())
-        if actual != asset.target_md5:
-            raise UpdaterError(f"CopyOver 内容校验失败: {asset.name}")
-        await asyncio.to_thread(staging.write_bytes, data)
-    else:
-        diff_path = temp_dir / f"{uuid.uuid4().hex}.diff"
-        await asyncio.to_thread(diff_path.write_bytes, data)
-        try:
-            old = resolve_within(game_dir, asset.original_name)
-            if not await asyncio.to_thread(old.is_file):
-                raise UpdaterError(f"打补丁所需的旧文件缺失: {asset.original_name}")
-            await asyncio.to_thread(_run_hpatchz, hpatchz, old, diff_path, staging)
-        finally:
-            diff_path.unlink(missing_ok=True)
-        actual = await asyncio.to_thread(_md5_file, staging)
-        if actual != asset.target_md5:
-            staging.unlink(missing_ok=True)
-            raise UpdaterError(f"补丁结果校验失败: {asset.name}")
+    try:
+        if asset.method == METHOD_COPYOVER:
+            # 分片本身就是新内容
+            actual = await asyncio.to_thread(lambda: hashlib.md5(data).hexdigest())
+            if actual != asset.target_md5:
+                raise UpdaterError(f"CopyOver 内容校验失败: {asset.name}")
+            await asyncio.to_thread(staging.write_bytes, data)
+        else:
+            diff_path = temp_dir / f"{uuid.uuid4().hex}.diff"
+            await asyncio.to_thread(diff_path.write_bytes, data)
+            try:
+                old = resolve_within(game_dir, asset.original_name)
+                if not await asyncio.to_thread(old.is_file):
+                    raise UpdaterError(f"打补丁所需的旧文件缺失: {asset.original_name}")
+                # 旧文件必须仍是差分基线内容：不符说明它被别的途径改过（比如
+                # 上次中断后已经换新），硬打出来的东西过不了校验，只会更难排查
+                if (
+                    asset.original_md5
+                    and await asyncio.to_thread(_md5_file, old) != asset.original_md5
+                ):
+                    raise UpdaterError(
+                        f"补丁源文件不是差分基线内容（可能已被更新过）: "
+                        f"{asset.original_name}"
+                    )
+                await asyncio.to_thread(_run_hpatchz, hpatchz, old, diff_path, staging)
+            finally:
+                diff_path.unlink(missing_ok=True)
+            actual = await asyncio.to_thread(_md5_file, staging)
+            if actual != asset.target_md5:
+                raise UpdaterError(f"补丁结果校验失败: {asset.name}")
 
-    os.replace(staging, target)
-    return len(data)
+        os.replace(staging, target)
+        _append_journal(temp_dir, asset.name)
+        return len(data)
+    finally:
+        # 成功路径里 staging 已被 replace 走，这里只是兜底清掉失败残骸
+        staging.unlink(missing_ok=True)
 
 
 def write_local_version(game_dir: Path, version: str) -> None:
@@ -1572,7 +1682,9 @@ async def execute_plan(
     async with game_dir_lock(game_dir):
         try:
             await asyncio.to_thread(temp_dir.mkdir, parents=True, exist_ok=True)
-            done = _load_journal(temp_dir)
+            journal_key = f"{plan.local_version or '?'}->{plan.remote_version}"
+            done = _load_journal(temp_dir, journal_key)
+            _start_journal(temp_dir, journal_key)
             pending = [asset for asset in plan.assets if asset.name not in done]
             completed = len(done)
 
@@ -1616,10 +1728,10 @@ async def execute_plan(
                 ]
                 if failures:
                     raise failures[0]
-                for asset, outcome in zip(batch, outcomes):
+                # 流水账已由 _apply_asset 在替换成功后逐文件补记，这里只计数
+                for outcome in outcomes:
                     completed += 1
                     downloaded += int(outcome)  # type: ignore[arg-type]
-                    _append_journal(temp_dir, asset.name)
 
                 if on_progress is not None and throttle.ready():
                     await on_progress(
