@@ -52,6 +52,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -63,6 +64,7 @@ from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 from google.protobuf.message import DecodeError
 
 from app.utils import get_logger
+from app.utils.io import atomic_write
 
 logger = get_logger("原神更新")
 
@@ -411,7 +413,7 @@ INCREMENTAL_KINDS = frozenset({UpdateKind.PATCH, UpdateKind.NOOP})
 
 @dataclass(frozen=True)
 class PackageInfo:
-    """``getGamePackages`` 里一个分支的包信息。"""
+    """``getGameBranches`` 里一个分支的包信息。"""
 
     package_id: str
     password: str
@@ -485,6 +487,8 @@ class GenshinPlan:
     assets: tuple[PatchAsset, ...] = ()
     #: 差分分片的基址
     diff_url_prefix: str = ""
+    #: 差分分片是否 zstd 压缩（跟随接口各自的来源标志）
+    diff_compressed: bool = False
 
     @property
     def is_incremental(self) -> bool:
@@ -708,6 +712,29 @@ def _package_info(branch: dict[str, Any], preset: RegionPreset) -> PackageInfo:
     )
 
 
+def _data_mapping(payload: dict[str, Any]) -> dict[str, Any]:
+    """取响应里的 ``data`` 映射。
+
+    接口包封里 ``data`` 必须是对象（或缺失）；是数组/标量说明协议变了，
+    直接按异常处理，不让它变成下游的 AttributeError。
+
+    Args:
+        payload: 已校验为对象的响应包封。
+
+    Returns:
+        ``data`` 映射；缺失时为空字典。
+
+    Raises:
+        UpdaterError: ``data`` 存在但不是对象时。
+    """
+    data = payload.get("data")
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise UpdaterError(f"响应 data 不是对象: {type(data).__name__}")
+    return data
+
+
 async def fetch_branches(
     client: httpx.AsyncClient, preset: RegionPreset
 ) -> tuple[PackageInfo, PackageInfo | None]:
@@ -724,10 +751,12 @@ async def fetch_branches(
         UpdaterError: 接口异常或缺少主分支时。
     """
     payload = await _request(client, preset.branches_url)
-    entries = (payload.get("data") or {}).get("game_branches") or []
+    entries = _data_mapping(payload).get("game_branches") or []
     if not entries:
         raise UpdaterError(f"{preset.label}：getGameBranches 没有返回分支")
     entry = entries[0]
+    if not isinstance(entry, dict):
+        raise UpdaterError(f"{preset.label}：分支条目不是对象: {entry!r}")
     main = entry.get("main")
     if not isinstance(main, dict):
         raise UpdaterError(f"{preset.label}：分支里没有 main")
@@ -783,8 +812,11 @@ def _find_manifest_entry(
     Returns:
         清单条目；没有时返回 ``None``。
     """
-    for entry in (payload.get("data") or {}).get("manifests", []):
-        if str(entry.get("matching_field") or "").casefold() == matching_field:
+    for entry in _data_mapping(payload).get("manifests") or []:
+        if (
+            isinstance(entry, dict)
+            and str(entry.get("matching_field") or "").casefold() == matching_field
+        ):
             return entry
     return None
 
@@ -953,6 +985,9 @@ def build_patch_assets(
 
     Returns:
         ``(待处理明细, 待删旧文件)`` 二元组。
+
+    Raises:
+        UpdaterError: 差分清单里点名的文件缺少本机基线的分片信息时。
     """
     target_index = {str(asset.AssetName): asset for asset in target_assets.Assets}
     assets: list[PatchAsset] = []
@@ -965,7 +1000,9 @@ def build_patch_assets(
             continue
         info = _pick_asset_info(asset_property, baseline)
         if info is None:
-            continue
+            # 点名了却没有本机基线的分片：协议与预期不符。漏掉这个文件却照样写
+            # 版本号会产出「混装却标新版」的客户端，宁可停手
+            raise UpdaterError(f"差分清单缺少基线 {baseline} 的分片信息: {name}")
         chunk = info.Chunk
         original_name = str(chunk.OriginalFileName)
         assets.append(
@@ -1010,11 +1047,17 @@ def summarize_assets(
     )
 
 
+#: 无论清单怎么说都不删除的根目录文件（小写比对）：配置与主程序一旦删错，
+#: 客户端直接不可用
+_PROTECTED_REMOVALS = frozenset({"config.ini", "yuanshen.exe", "genshinimpact.exe"})
+
+
 def collect_removals(patch_proto: Any, in_target: set[str]) -> tuple[str, ...]:
     """收集需要删除的旧文件。
 
     ``unused_assets`` 是被淘汰的文件，但目标清单里仍在用的必须留下——判据以目标
-    清单为准，不以差分清单的声明为准。
+    清单为准，不以差分清单的声明为准。比对大小写不敏感：Windows 上同一个文件的
+    大小写漂移不该被当成两个，否则会删掉目标清单里仍在用的文件。
 
     Args:
         patch_proto: ``SophonPatchProto`` 消息。
@@ -1023,13 +1066,21 @@ def collect_removals(patch_proto: Any, in_target: set[str]) -> tuple[str, ...]:
     Returns:
         待删除的相对路径元组。
     """
+    known = {name.casefold() for name in in_target}
     removed: list[str] = []
     for unused in patch_proto.UnusedAssets:
         for info in unused.AssetInfos:
             for asset in info.Assets:
                 name = str(asset.FileName)
-                if name and name not in in_target:
-                    removed.append(name)
+                if not name:
+                    continue
+                key = name.casefold()
+                if key in known:
+                    continue
+                if "/" not in key and "\\" not in key and key in _PROTECTED_REMOVALS:
+                    logger.warning("清单要求删除受保护的文件，已跳过: {}", name)
+                    continue
+                removed.append(name)
     return tuple(sorted(set(removed)))
 
 
@@ -1146,6 +1197,7 @@ async def plan_update(
             patch=summarize_assets(assets, removals),
             assets=assets,
             diff_url_prefix=patch_ref.chunk_url_prefix,
+            diff_compressed=patch_ref.chunk_compressed,
         )
     except UpdaterError as error:
         logger.warning("原神更新计划失败: {}", error)
@@ -1157,6 +1209,19 @@ async def plan_update(
             local_version=local_version,
             remote_version="",
             message=str(error),
+        )
+    except Exception as error:  # noqa: BLE001
+        # 兜底：响应形状异常（字段类型不符等）也不能逃逸成任务崩溃，
+        # 一律按「无法判定」交给调用方放行。CancelledError 属 BaseException，不受影响
+        logger.opt(exception=True).warning("原神更新计划异常: {}", error)
+        return GenshinPlan(
+            region=region,
+            game_dir=game_dir,
+            state=InstallState.UNKNOWN,
+            kind=UpdateKind.UNKNOWN,
+            local_version=local_version,
+            remote_version="",
+            message=f"检查更新时出现异常: {error}",
         )
     finally:
         if owned:
@@ -1170,7 +1235,7 @@ async def plan_update(
 #: 一行面向用户的进度文案
 ProgressHook = Callable[[str], Awaitable[None]]
 
-#: 中止判定；为真时在文件边界收工
+#: 中止判定；为真时在文件批次边界收工
 AbortHook = Callable[[], bool]
 
 #: 同时处理的文件数；下载与打补丁都在这个上限内
@@ -1268,6 +1333,10 @@ def safe_relative(name: str) -> Path:
     raw = str(name or "").strip().replace("\\", "/")
     if not raw:
         raise PathUnsafeError("清单条目缺少路径")
+    if "\x00" in raw:
+        # Windows 上带 NUL 的路径会让 resolve() 抛 ValueError，那不在调用方的
+        # 捕获范围内，会在更外层变成任务崩溃
+        raise PathUnsafeError(f"清单条目含 NUL 字符: {name!r}")
     candidate = Path(raw)
     if candidate.is_absolute() or candidate.drive or candidate.root:
         raise PathUnsafeError(f"清单条目是绝对路径: {name!r}")
@@ -1440,6 +1509,7 @@ async def _apply_asset(
     asset: PatchAsset,
     hpatchz: Path,
     diff_url_prefix: str,
+    diff_compressed: bool,
 ) -> int:
     """处理一个文件：取差分 → 校验 → 同卷原子替换 → 记流水账。
 
@@ -1454,9 +1524,10 @@ async def _apply_asset(
         asset: 待处理明细。
         hpatchz: ``hpatchz`` 可执行文件路径。
         diff_url_prefix: 差分分片基址。
+        diff_compressed: 差分分片是否 zstd 压缩。
 
     Returns:
-        本次下载的字节数。
+        本次下载的字节数（压缩时按网线上的长度计）。
 
     Raises:
         UpdaterError: 取回或校验失败时。
@@ -1471,7 +1542,10 @@ async def _apply_asset(
         return 0
 
     url = f"{diff_url_prefix.rstrip('/')}/{asset.patch_name}"
-    data = await _fetch_range(client, url, asset.patch_offset, asset.patch_length)
+    raw = await _fetch_range(client, url, asset.patch_offset, asset.patch_length)
+    downloaded = len(raw)
+    # 压缩标志跟随接口声明：PatchLength 是网线上的长度，长度校验在解压之前做
+    data = _decompress(raw, compressed=True) if diff_compressed else raw
 
     # 先落到同目录的临时名，校验通过再原子改名——中途失败不会留下半个目标文件
     staging = target.with_name(f"{target.name}.mas-new")
@@ -1503,24 +1577,32 @@ async def _apply_asset(
                     )
                 await asyncio.to_thread(_run_hpatchz, hpatchz, old, diff_path, staging)
             finally:
-                diff_path.unlink(missing_ok=True)
+                # 用 suppress 包住：取消落在 hpatchz 上时文件可能仍被占用，
+                # 让这儿抛 OSError 会把 CancelledError 顶掉、任务被误判成写入失败
+                with suppress(OSError):
+                    diff_path.unlink(missing_ok=True)
             actual = await asyncio.to_thread(_md5_file, staging)
             if actual != asset.target_md5:
                 raise UpdaterError(f"补丁结果校验失败: {asset.name}")
 
         os.replace(staging, target)
         _append_journal(temp_dir, asset.name)
-        return len(data)
+        return downloaded
     finally:
-        # 成功路径里 staging 已被 replace 走，这里只是兜底清掉失败残骸
-        staging.unlink(missing_ok=True)
+        # 成功路径里 staging 已被 replace 走，这里只是兜底清掉失败残骸；
+        # 同样不能让它抛 OSError 掩盖取消
+        with suppress(OSError):
+            staging.unlink(missing_ok=True)
 
 
 def write_local_version(game_dir: Path, version: str) -> None:
     """把新版本号写回 ``config.ini`` 的 ``[General]``。
 
-    只改 ``game_version`` 那一行，其余内容与原文件编码（含 BOM）、行尾原样保留。
+    只改 ``game_version`` 那一行，其余内容与原文件（含 BOM）、行尾原样保留。
     行解析与读取一致：不用 ``configparser``，该文件含重复键与非常规写法。
+
+    读取与写回都是**严格 UTF-8**：官方写的就是 UTF-8，解不出（或被别的编码改过）
+    宁可停手，也不能用替换字符把整份配置写坏。落盘走原子写，断电不会截断配置。
 
     版本号是「本轮已完成」的标记，只在全部文件落盘、旧文件清理完之后才写。
 
@@ -1529,7 +1611,8 @@ def write_local_version(game_dir: Path, version: str) -> None:
         version: 目标版本串。
 
     Raises:
-        UpdaterError: ``config.ini`` 不存在、没有 ``game_version`` 或写回失败时。
+        UpdaterError: ``config.ini`` 不存在、不是 UTF-8、没有 ``game_version``
+            或写回失败时。
     """
     ini_path = game_dir / "config.ini"
     try:
@@ -1538,7 +1621,12 @@ def write_local_version(game_dir: Path, version: str) -> None:
         raise UpdaterError(f"读取 config.ini 失败: {ini_path} - {error}") from error
 
     has_bom = raw_bytes.startswith(b"\xef\xbb\xbf")
-    text = raw_bytes.decode("utf-8-sig", errors="replace")
+    try:
+        text = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise UpdaterError(
+            f"config.ini 不是 UTF-8（{error}），拒绝改写以免损坏: {ini_path}"
+        ) from error
     lines = text.splitlines(keepends=True)
 
     in_general = False
@@ -1561,7 +1649,7 @@ def write_local_version(game_dir: Path, version: str) -> None:
 
     payload = ("\ufeff" if has_bom else "") + "".join(lines)
     try:
-        ini_path.write_bytes(payload.encode("utf-8"))
+        atomic_write(ini_path, payload.encode("utf-8"))
     except OSError as error:
         raise UpdaterError(f"写回 config.ini 失败: {ini_path} - {error}") from error
 
@@ -1630,7 +1718,7 @@ async def execute_plan(
         plan: 由 :func:`plan_update` 得出的计划。
         hpatchz: ``hpatchz`` 可执行文件路径（调用方用 ``ensure_hpatchz`` 取得）。
         on_progress: 一行行进度文案的回调。
-        should_abort: 中止判定；为真时在文件边界收工。
+        should_abort: 中止判定；为真时在文件批次边界收工。
         client: 复用的 HTTP 客户端；``None`` 时临时新建一个。
         workers: 同时处理的文件数。
         timeout: 单次请求超时（秒）。
@@ -1684,6 +1772,18 @@ async def execute_plan(
             await asyncio.to_thread(temp_dir.mkdir, parents=True, exist_ok=True)
             journal_key = f"{plan.local_version or '?'}->{plan.remote_version}"
             done = _load_journal(temp_dir, journal_key)
+            if done:
+                # 流水账只记名字，跳过前复核目标确实已是本次内容：中途被别的
+                # 途径改回旧版或删掉时，不能把它当成已完成，否则会漏更却写版本号
+                by_name = {asset.name: asset for asset in plan.assets}
+                verified: set[str] = set()
+                for name in done:
+                    asset = by_name.get(name)
+                    if asset is None:
+                        continue
+                    if await _target_is_current(resolve_within(game_dir, name), asset):
+                        verified.add(name)
+                done = verified
             _start_journal(temp_dir, journal_key)
             pending = [asset for asset in plan.assets if asset.name not in done]
             completed = len(done)
@@ -1716,6 +1816,7 @@ async def execute_plan(
                             asset,
                             hpatchz,
                             plan.diff_url_prefix,
+                            plan.diff_compressed,
                         )
                         for asset in batch
                     ),
@@ -1780,6 +1881,17 @@ async def execute_plan(
             return InstallResult(
                 success=False,
                 message=f"写入游戏目录失败：{error}",
+                files_done=completed,
+                files_total=total,
+                bytes_downloaded=downloaded,
+            )
+        except Exception as error:  # noqa: BLE001
+            # 兜底：意料之外的异常也不能逃逸成任务崩溃（已替换的文件保持有效，
+            # 不写版本号，重开即续传）。CancelledError 属 BaseException，不受影响
+            logger.opt(exception=True).warning("原神更新出现异常: {}", error)
+            return InstallResult(
+                success=False,
+                message=f"更新时出现异常：{error}",
                 files_done=completed,
                 files_total=total,
                 bytes_downloaded=downloaded,

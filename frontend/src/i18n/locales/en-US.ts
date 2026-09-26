@@ -1754,6 +1754,9 @@ export default {
     bettergiUpdateConnecting: 'Connecting to the update task...',
     bettergiUpdateStartFailed: 'Could not start the Genshin update',
     bettergiUpdateStopFailed: 'Could not stop the Genshin update',
+    bettergiUpdateStopFailedRunning:
+      'Could not stop the Genshin update; it is still running in the background, please retry later',
+    bettergiUpdateSaveUserFirst: 'Save the user first, then check for updates',
     bettergiCloseGameOnFinishHint: 'Whether to close the game once the task has finished running',
     bettergiRetryLimitHint: 'Give up once this many attempts have failed',
     bettergiRunTimeoutHint: 'Treated as a timeout when the log stops changing for this long',

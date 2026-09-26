@@ -1687,6 +1687,9 @@ export default {
     bettergiUpdateConnecting: '更新タスクに接続しています...',
     bettergiUpdateStartFailed: '原神の更新を開始できませんでした',
     bettergiUpdateStopFailed: '原神の更新を停止できませんでした',
+    bettergiUpdateStopFailedRunning:
+      '原神の更新を停止できませんでした。タスクはバックグラウンドで実行中です。しばらくしてから再試行してください',
+    bettergiUpdateSaveUserFirst: '先にユーザーを保存してから更新を確認してください',
     bettergiCloseGameOnFinishHint: 'タスクの実行が終わったときにゲームを終了するかどうか',
     bettergiRetryLimitHint: 'この回数を超えても失敗する場合は中止します',
     bettergiRunTimeoutHint: 'ログが長時間更新されない場合はタイムアウトと判定します',

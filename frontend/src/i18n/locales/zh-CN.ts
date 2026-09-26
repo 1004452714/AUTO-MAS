@@ -1678,6 +1678,8 @@ export default {
     bettergiUpdateConnecting: '正在连接更新任务...',
     bettergiUpdateStartFailed: '启动原神更新失败',
     bettergiUpdateStopFailed: '停止原神更新失败',
+    bettergiUpdateStopFailedRunning: '停止原神更新失败，任务仍在后台运行，请稍后重试',
+    bettergiUpdateSaveUserFirst: '请先保存用户，再检查更新',
     bettergiCloseGameOnFinishHint: '任务执行完毕后是否关闭游戏',
     bettergiRetryLimitHint: '超过该次数仍失败则终止',
     bettergiRunTimeoutHint: '日志长期无变化将判定超时',
