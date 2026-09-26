@@ -15,16 +15,8 @@ export type BetterGIConfig_Game = {
      */
     CloseOnFinish?: (boolean | null);
     /**
-     * 是否在启动 BetterGI 前由 MAS 检查并接管原神客户端更新
+     * 启动游戏前由 MAS 检查并应用原神客户端增量更新（拿不到差分则停手提示）
      */
     IfAutoUpdate?: (boolean | null);
-    /**
-     * 原神游戏程序（exe）
-     */
-    UpdateExe?: (string | null);
-    /**
-     * 更新时限（分钟）
-     */
-    UpdateTimeLimit?: (number | null);
 };
 

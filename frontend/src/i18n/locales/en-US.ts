@@ -147,6 +147,8 @@ export default {
     cancelDownload: 'Cancel the download',
     cancellingDeletesUnfinishedDownload: 'Cancelling deletes the unfinished download.',
     cancel2: 'Cancel',
+    powerCountdownConnectionLost:
+      'Lost connection to the backend. The countdown may still be running; the remaining time is no longer updated.',
     cancelUpdateDownload: 'Cancel the update download?',
     visualSelection: 'Visual selection',
     downloadBackground: 'Download in the background',
@@ -1010,6 +1012,9 @@ export default {
     mfwGamePackageNamePassed:
       'Launch the game together with the emulator. Detected from the project pipeline and filled in when the interface is read or the resource changes; when detection finds nothing or several candidates it stays empty, the game is not launched, and you can fill it in here',
     mfwGamePackageNamePlaceholder: 'e.g. com.hypergryph.arknights',
+    mfwGameUpdateOff: 'Off',
+    mfwGameUpdateCheck: 'Check only (ask to update manually when outdated)',
+    mfwGameUpdateAutoInstall: 'Download and install automatically',
     maaendScriptConfiguration: 'MaaEnd script configuration',
     maaendPath: 'MaaEnd path',
     maaendAdapterStillUnder:
@@ -1134,18 +1139,6 @@ export default {
     checkGameUpdateBeforeLogin:
       'When enabled, the game client version is compared between the server and the emulator before logging in. An outdated client gets stuck on the force-update screen during login',
     updateAutomaticallyBeforeLaunching: 'Update automatically before launching',
-    genshinUpdateAuto: 'Update Genshin before launching',
-    genshinUpdateAutoHint:
-      'MAS checks the version and finishes downloading and installing on its own before the task starts the game, so the official launcher is not needed. Only incremental patches are applied automatically; when none is available it stops and defers to the official launcher. Bilibili server is not supported, update it with the official launcher',
-    genshinUpdateExe: 'Genshin game program',
-    genshinUpdateExeHint:
-      'Only YuanShen.exe and GenshinImpact.exe are accepted; the server is decided from the file name and the install folder is its parent directory',
-    genshinUpdateExePlaceholder: 'Select YuanShen.exe or GenshinImpact.exe',
-    genshinUpdateExePick: 'Browse',
-    genshinUpdateExeRejected: 'Only YuanShen.exe or GenshinImpact.exe can be selected',
-    genshinUpdateTimeLimit: 'Update time limit (min)',
-    genshinUpdateTimeLimitHint:
-      'The round is aborted once it runs over; finished files stay, so the next run resumes',
     waitAfterLaunchSeconds: 'Wait after launch (seconds)',
     launchMode: 'Launch mode',
     howLongWaitAfter2: 'How long to wait after the game launches',
@@ -1677,7 +1670,13 @@ export default {
     m9aFlavorAccountTooltip:
       'When the account is filled, a “Switch account” task is added automatically (CN official server only); the password is a local note only and is never passed to the script',
     m9aFlavorQueueHint:
-      'Start game, close game and switch account are added automatically by the M9A adapter; no need to add them by hand',
+      'Start game, switch account and close game are added by MAS from "Account" above (start first, switch right after, close last); they are not offered in "Add task" or presets',
+    m9aFlavorManagedTaskWarning:
+      'This queue has {count} "Switch account" tasks (accounts {accounts}). In M9A one user is one account: split into {count} users (fill one account into "Account" above for each), then delete these tasks from the queue. This user will not run until then',
+    m9aFlavorManagedTaskNotice:
+      '"{tasks}" are added by MAS from the info above and do not need to stay in the queue; runs use the fixed order anyway. They are removed the next time the queue is saved or AUTO-MAS restarts (a switch-account target goes into "Account" above)',
+    m9aFlavorGameUpdateHint:
+      'After the emulator starts, compare the game client with the latest version on the official site. Official server only (Bilibili and other resources are not checked). When outdated: "Check only" fails this run and asks you to update manually; "Download and install automatically" downloads the official package (about 2 GB) and installs it over the old client, keeping game data',
     mssFlavorScriptTitle: 'Edit MSS script',
     mssFlavorSourceDirectory: 'MSS program directory',
     mssFlavorSourceHint: 'Pick the MaaStellaSora directory that contains interface.json',
@@ -1688,7 +1687,8 @@ export default {
       '· With "Event quick battle" in the task queue it is moved to the front and runs first while an event is live, and skipped when none is running\n' +
       '· With an empty queue and no plan selected there is nothing to run: tick at least "Bounty Trial quick battle", or pick a plan (which adds it automatically)\n' +
       '· The new tower climb is moved to the end; to climb only once a week, add it to "Skip once done this week" in the script\'s Run configuration',
-    mssFlavorQueueEmpty: 'The task queue is empty and the plan is still Fixed: this run has nothing to execute — add at least one task or pick a plan',
+    mssFlavorQueueEmpty:
+      'The task queue is empty and the plan is still Fixed: this run has nothing to execute — add at least one task or pick a plan',
     mssFlavorActivityFirst: 'Activity first',
     mssFlavorActivityFirstHint:
       'When on, the event task is added and moved to the front while an event is live even if the queue does not have it; nothing is added when the event data cannot be fetched',
@@ -1738,9 +1738,33 @@ export default {
     bettergiControllerCloud: 'PC - Cloud Genshin (not implemented)',
     bettergiControllerDesktopClone: 'PC - desktop clone (not implemented)',
     bettergiCloseGameOnFinish: 'Close the game when the task finishes',
+    bettergiGenshinUpdate: 'Update Genshin client before launch',
+    bettergiGenshinUpdateHint:
+      'Before the task launches the game, MAS checks and applies the official incremental patch, so the official launcher is not needed. When no patch is available (fresh install or full per-file comparison) it stops and asks you to use the official launcher. Bilibili server: please use the official launcher',
+    bettergiCheckUpdateTitle: 'Check the Genshin client for updates',
+    bettergiUpdateUnsupportedHint:
+      'Only the official (CN) and global clients are supported (Asia / Europe / America / TW-HK-MO). For the Bilibili client, please use the official launcher',
+    bettergiUpdateProgressTitle: 'Genshin client update progress',
+    bettergiUpdateUpToDate: 'Already up to date; no update needed',
+    bettergiWillBeUpdated:
+      'The Genshin client used by this user will be checked and updated with official incremental patches. The update may download several GB, so make sure the game is not running',
+    bettergiUpdateFailed: 'Genshin update failed: {p0}',
+    bettergiUpdateTask: 'The Genshin update task finished',
+    bettergiUpdateTimed: 'The Genshin update timed out and was stopped',
+    bettergiUpdateConnecting: 'Connecting to the update task...',
+    bettergiUpdateStartFailed: 'Could not start the Genshin update',
+    bettergiUpdateStopFailed: 'Could not stop the Genshin update',
+    bettergiUpdateStopFailedRunning:
+      'Could not stop the Genshin update; it is still running in the background, please retry later',
+    bettergiUpdateSaveUserFirst: 'Save the user first, then check for updates',
     bettergiCloseGameOnFinishHint: 'Whether to close the game once the task has finished running',
     bettergiRetryLimitHint: 'Give up once this many attempts have failed',
     bettergiRunTimeoutHint: 'Treated as a timeout when the log stops changing for this long',
+    bettergiAccountSwitchMethod: 'Account switch method',
+    bettergiAccountSwitchMethodHint:
+      "BetterGI script = switch via the BetterGI 'SwitchAccountMultipleMode' script; MAS = MAS drives the game UI directly (CN official: with password uses account+password, otherwise the saved-accounts dropdown; CN Bilibili: matches the login records by Bilibili username, password login not supported yet). MAS does not support international clients yet — keep using the BetterGI script",
+    bettergiAccountSwitchMethodBgi: 'BetterGI script',
+    bettergiAccountSwitchMethodMas: 'MAS (CN official / Bilibili, recommended)',
     useAdminLaunch: 'Launch with administrator privileges',
     bettergiUseAdminHint:
       'On by default (BetterGI needs admin rights). If MAS runs without admin, each launch triggers a UAC prompt — turn this off for unattended tasks. When MAS itself is already elevated, keeping it on never re-prompts',
@@ -1760,11 +1784,28 @@ export default {
     bettergiAccount: 'Account',
     bettergiEnterAccount: 'Enter the account (for account switching; leave empty if not needed)',
     bettergiAccountHint:
-      'Used for account switching; leave empty if you do not need it. In dropdown mode enter the full phone number or email and MAS masks it the way the game displays it',
+      'Used for account switching; leave empty if you do not need it. CN official: enter the full phone number or email and MAS masks it the way the game displays it; CN Bilibili: enter the Bilibili username',
     bettergiAccountUid: 'Account UID',
     bettergiEnterUid: 'Enter the UID (recommended when switching accounts)',
     bettergiUidHint:
-      'Optional, but recommended for account switching: when it already matches before switching, the switch is skipped',
+      'Optional, but recommended for account switching: when it already matches before switching, the switch is skipped (BetterGI script method only)',
+    bettergiGameClient: 'Game client',
+    bettergiGameClientHint:
+      'CN official / CN Bilibili / international are three isolated clients (a Bilibili account can only log into the Bilibili client). Leave empty to follow the BetterGI global config; when filled, MAS temporarily launches that client for this user at runtime (BetterGI config is not modified) — users on different servers of the same script can each have their own client',
+    bettergiGameClientPlaceholder:
+      'Configure the game path in BetterGI settings first, or pick the game executable for this user (YuanShen.exe / GenshinImpact.exe)',
+    bettergiGameClientRestore: 'Restore BGI default',
+    bettergiGameClientInvalid: 'Pick the game executable (YuanShen.exe or GenshinImpact.exe)',
+    bettergiGameClientUnknownWarning:
+      'Cannot detect the game client channel (config.ini missing or invalid path); pick the game server manually',
+    bettergiGameClientIntlWarning:
+      'International client detected, but the specific server cannot be determined; pick the game server manually',
+    bettergiGameClientSynced: 'Game server automatically switched to {server} based on the client',
+    bettergiServerMismatchWarning:
+      'The selected server ({server}) does not match the current game client ({channel}); tasks will not run properly — adjust one of them',
+    bettergiChannelOfficial: 'CN official',
+    bettergiChannelBili: 'CN Bilibili',
+    bettergiChannelGlobal: 'International',
     bettergiPasswordHint:
       'With no password, account switching uses the in-game dropdown. Fill it in if switching needs a password login',
     bettergiEnterPasswordPlaceholder:
@@ -3268,6 +3309,13 @@ export default {
     anotherWindowTookOverBackend: 'Another window took over the backend connection',
     thisWindowStoppedReconnecting:
       'This window stopped reconnecting so the two windows do not keep replacing each other.',
+    backgroundInitDegradedTitle: 'Some background services failed to start',
+    backgroundInitFailedTitle: 'Background services failed to start',
+    backgroundInitTimerStarted:
+      'Scheduled tasks started normally. The features below may be unavailable until the app is restarted.',
+    backgroundInitTimerNotStarted:
+      'Scheduled tasks may not have started, so queues will not run at their scheduled times. Please restart the app.',
+    backgroundInitFailedSteps: 'Failed: {steps}',
     couldNotAddAccount: 'Could not add the account group',
     gotIt: 'Got it',
     continueDownload: 'Continue the download',
@@ -3591,6 +3639,7 @@ export default {
     },
     toast: {
       tabAutoCreated: 'Console {title} created automatically',
+      tabReused: 'Started in console {title}',
       mainTabUndeletable: 'The main console cannot be closed',
       tabDeleted: 'Console "{title}" closed',
       noIdleTabs: 'No idle consoles to close',

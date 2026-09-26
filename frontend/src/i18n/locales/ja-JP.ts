@@ -150,6 +150,8 @@ export default {
     cancellingDeletesUnfinishedDownload:
       'キャンセルすると、未完了のダウンロードファイルは削除されます。',
     cancel2: 'キャンセル',
+    powerCountdownConnectionLost:
+      'バックエンドとの接続が切れました。カウントダウンは続いている可能性があり、残り秒数は更新されません。',
     cancelUpdateDownload: '更新のダウンロードをキャンセルしますか？',
     visualSelection: 'ビジュアル選択',
     downloadBackground: 'バックグラウンドでダウンロード',
@@ -959,6 +961,9 @@ export default {
     mfwGamePackageNamePassed:
       'エミュレータ起動と同時にゲームを起動します。interface の読み込み時やリソース切替時にプロジェクトの pipeline から判別して自動入力します。判別できない場合や候補が複数ある場合は空欄のままで起動せず、ここに手動で入力できます',
     mfwGamePackageNamePlaceholder: '例: com.hypergryph.arknights',
+    mfwGameUpdateOff: 'オフ',
+    mfwGameUpdateCheck: '確認のみ（古い場合は手動更新を案内）',
+    mfwGameUpdateAutoInstall: '自動でダウンロードしてインストール',
     maaendScriptConfiguration: 'MaaEnd スクリプト設定',
     maaendPath: 'MaaEnd のパス',
     maaendAdapterStillUnder: 'MaaEnd 専用アダプターはテスト中です。問題があれば参加してください：',
@@ -1082,18 +1087,6 @@ export default {
     checkGameUpdateBeforeLogin:
       '有効にすると、ゲームにログインする前にサーバーとエミュレーター内のゲームクライアントのバージョンを比較します。クライアントが古いと強制更新画面でログインが止まります',
     updateAutomaticallyBeforeLaunching: '起動前に自動更新',
-    genshinUpdateAuto: '起動前に原神を自動更新',
-    genshinUpdateAutoHint:
-      'タスクがゲームを起動する前に、MAS がバージョン確認・ダウンロード・インストールまで自行完了し、公式ランチャーは不要です。増分パッチのみ自動適用し、無い場合は停止して公式ランチャーに任せます。Bサーバー（bili服）は非対応のため、公式ランチャーで各自更新してください',
-    genshinUpdateExe: '原神ゲームプログラム',
-    genshinUpdateExeHint:
-      'YuanShen.exe と GenshinImpact.exe のみ受け付けます。サーバーはファイル名から自動判定し、インストール先は同じフォルダになります',
-    genshinUpdateExePlaceholder: 'YuanShen.exe または GenshinImpact.exe を選択',
-    genshinUpdateExePick: '選択',
-    genshinUpdateExeRejected: 'YuanShen.exe または GenshinImpact.exe のみ選択できます',
-    genshinUpdateTimeLimit: '更新時間制限（分）',
-    genshinUpdateTimeLimitHint:
-      '超過すると今回の更新を中止します。完了済みのファイルは残り、次回その続きから再開します',
     waitAfterLaunchSeconds: '起動後の待機時間（秒）',
     launchMode: '起動方式',
     howLongWaitAfter2: 'ゲーム起動後に待つ時間',
@@ -1564,7 +1557,13 @@ export default {
     m9aFlavorAccountTooltip:
       'アカウントを入力すると「アカウント切替」タスクが自動で追加されます（公式サーバーのみ）。パスワードはローカルのメモ用で、スクリプトには渡されません',
     m9aFlavorQueueHint:
-      'ゲーム起動・ゲーム終了・アカウント切替は M9A 専用処理が自動で追加します。手動で追加する必要はありません',
+      'ゲーム起動・アカウント切替・ゲーム終了は上の「アカウント」をもとに MAS が自動で追加します（起動が先頭、切替はその直後、終了は最後）。「タスクを追加」やプリセットには表示されません',
+    m9aFlavorManagedTaskWarning:
+      'このキューには「アカウント切替」が {count} 件あります（アカウント {accounts}）。M9A では 1 ユーザー = 1 アカウントです。{count} 人のユーザーに分けて（それぞれ上の「アカウント」に 1 つずつ入力）、これらのタスクをキューから削除してください。分けるまでこのユーザーは実行されません',
+    m9aFlavorManagedTaskNotice:
+      '「{tasks}」は上の情報をもとに MAS が自動で追加するため、キューに残す必要はありません（実行時も固定の順序で実行されます）。次にタスクキューを保存するか AUTO-MAS を再起動するとキューから外れます（アカウント切替の対象アカウントは上の「アカウント」に入ります）',
+    m9aFlavorGameUpdateHint:
+      'エミュレーター起動後、ゲームクライアントを公式サイトの最新版と比較します。公式サーバーのみ対象です（bilibili サーバーなど他のリソースは確認しません）。古い場合：「確認のみ」は今回の実行を失敗にして手動更新を案内し、「自動でダウンロードしてインストール」は約 2 GB の公式インストーラーをダウンロードして上書きインストールします（ゲームデータは保持されます）',
     mssFlavorScriptTitle: 'MSS スクリプトを編集',
     mssFlavorSourceDirectory: 'MSS プログラムディレクトリ',
     mssFlavorSourceHint: 'interface.json を含む MaaStellaSora ディレクトリを選択します',
@@ -1575,7 +1574,8 @@ export default {
       '· タスクキューに「イベントクイックバトル」があると、イベント期間中は先頭に移動して先に実行し、期間外は自動でスキップします\n' +
       '· タスクキューが空でプランも選んでいない場合は実行できるタスクがありません。少なくとも「懸賞試練クイックバトル」にチェックを入れるか、プランを選んでください（プランを選ぶと自動で追加されます）\n' +
       '· 新しい塔登りは最後に回します。週に一度だけ実行するには、スクリプトの「実行設定」の「今週完了したらスキップ」に追加してください',
-    mssFlavorQueueEmpty: 'タスクキューが空で、プランも「固定」のままです。この実行にはタスクがないので、少なくとも 1 つ追加するかプランを選んでください',
+    mssFlavorQueueEmpty:
+      'タスクキューが空で、プランも「固定」のままです。この実行にはタスクがないので、少なくとも 1 つ追加するかプランを選んでください',
     mssFlavorActivityFirst: 'イベント優先',
     mssFlavorActivityFirstHint:
       'オンにすると、キューにイベントタスクがなくてもイベント期間中は自動で追加して先頭に移動します。イベント情報が取れないときは追加しません',
@@ -1671,9 +1671,33 @@ export default {
     bettergiControllerCloud: 'PC - クラウド原神（未実装）',
     bettergiControllerDesktopClone: 'PC - デスクトップ分身（未実装）',
     bettergiCloseGameOnFinish: 'タスク終了後にゲームを終了する',
+    bettergiGenshinUpdate: '起動前に原神クライアントを更新',
+    bettergiGenshinUpdateHint:
+      'タスクがゲームを起動する前に、MAS が公式の増分パッチを確認・適用します（公式ランチャーは不要）。パッチが無い場合（新規インストール／ファイル単位の全量比較）は停止し、公式ランチャーでの更新を促します。Bサーバーは公式ランチャーをご利用ください',
+    bettergiCheckUpdateTitle: '原神クライアントの更新を確認',
+    bettergiUpdateUnsupportedHint:
+      '官服と国際服クライアント（アジア／ヨーロッパ／アメリカ／港澳台）のみ対応しています。Bサーバーは公式ランチャーをご利用ください',
+    bettergiUpdateProgressTitle: '原神クライアント更新の進捗',
+    bettergiUpdateUpToDate: '最新バージョンのため、更新は不要です',
+    bettergiWillBeUpdated:
+      'このユーザーが使う原神クライアントを確認し、公式の差分パッケージを適用します。数 GB のダウンロードが発生する場合があるため、ゲームが起動していないことを確認してください',
+    bettergiUpdateFailed: '原神の更新に失敗しました: {p0}',
+    bettergiUpdateTask: '原神の更新タスクが終了しました',
+    bettergiUpdateTimed: '原神の更新がタイムアウトしたため、自動的に停止しました',
+    bettergiUpdateConnecting: '更新タスクに接続しています...',
+    bettergiUpdateStartFailed: '原神の更新を開始できませんでした',
+    bettergiUpdateStopFailed: '原神の更新を停止できませんでした',
+    bettergiUpdateStopFailedRunning:
+      '原神の更新を停止できませんでした。タスクはバックグラウンドで実行中です。しばらくしてから再試行してください',
+    bettergiUpdateSaveUserFirst: '先にユーザーを保存してから更新を確認してください',
     bettergiCloseGameOnFinishHint: 'タスクの実行が終わったときにゲームを終了するかどうか',
     bettergiRetryLimitHint: 'この回数を超えても失敗する場合は中止します',
     bettergiRunTimeoutHint: 'ログが長時間更新されない場合はタイムアウトと判定します',
+    bettergiAccountSwitchMethod: 'アカウント切り替え方式',
+    bettergiAccountSwitchMethodHint:
+      'BetterGI スクリプト=BetterGI「切替アカウント多重モード」スクリプトで切り替え。MAS=MAS がゲーム画面を直接操作して切り替え（中国公式：パスワード入力ならアカウント+パスワード、未入力ならドロップダウン一覧。B鯖：Bilibili ユーザー名でログイン記録を照合、パスワードログインは未対応）。MAS は国際サーバーに未対応のため、国際サーバーでは BetterGI スクリプト方式をご利用ください',
+    bettergiAccountSwitchMethodBgi: 'BetterGI スクリプト',
+    bettergiAccountSwitchMethodMas: 'MAS（中国公式 / B鯖・推奨）',
     useAdminLaunch: '管理者権限で起動',
     bettergiUseAdminHint:
       '既定で有効（BetterGI には管理者権限が必要）。MAS が非管理者で実行されている場合、起動のたびに UAC が表示されるため、無人実行時はオフにできます。MAS が既に管理者権限の場合は再表示されません',
@@ -1694,11 +1718,30 @@ export default {
     bettergiAccount: 'アカウント',
     bettergiEnterAccount: 'アカウントを入力してください（アカウント切り替え用。不要な場合は空欄）',
     bettergiAccountHint:
-      'アカウント切り替えに使用します。不要な場合は空欄のままにしてください。ドロップダウンモードでは電話番号またはメールアドレスを完全な形で入力すると、MAS がゲームの表示に合わせて伏せ字に変換します',
+      'アカウント切り替えに使用します。不要な場合は空欄のままにしてください。中国公式：電話番号またはメールアドレスを入力すると、MAS がゲームの表示に合わせて伏せ字に変換します。B鯖：Bilibili ユーザー名を入力してください',
     bettergiAccountUid: 'アカウント UID',
     bettergiEnterUid: 'UID を入力してください（アカウント切り替え時は推奨）',
     bettergiUidHint:
-      '任意項目です。アカウント切り替え時は入力を推奨します。切り替え前に一致が確認できた場合、切り替え処理は行われません',
+      '任意項目です。アカウント切り替え時は入力を推奨します。切り替え前に一致が確認できた場合、切り替え処理は行われません（BetterGI スクリプト方式のみ有効）',
+    bettergiGameClient: 'ゲームクライアント',
+    bettergiGameClientHint:
+      '中国公式 / B鯖 / グローバルは互いに独立したクライアントです（Bilibili アカウントは B鯖クライアントにのみログイン可能）。空欄の場合は BetterGI のグローバル設定に従います。入力すると、実行時に MAS がそのクライアントを一時的に起動します（BetterGI の設定は変更しません）。同じスクリプト内の異なるサーバーのユーザーは、それぞれ独自のクライアントを設定できます',
+    bettergiGameClientPlaceholder:
+      '先に BetterGI の設定でゲームパスを構成するか、このユーザーのゲーム実行ファイル（YuanShen.exe / GenshinImpact.exe）を選択してください',
+    bettergiGameClientRestore: 'BGI 既定に戻す',
+    bettergiGameClientInvalid:
+      'ゲーム実行ファイル（YuanShen.exe または GenshinImpact.exe）を選択してください',
+    bettergiGameClientUnknownWarning:
+      'ゲームクライアントのチャネルを識別できません（config.ini の欠損または無効なパス）。ゲームサーバーを手動で指定してください',
+    bettergiGameClientIntlWarning:
+      'グローバルクライアントを検出しましたが、具体的なサーバーを特定できません。ゲームサーバーを手動で指定してください',
+    bettergiGameClientSynced:
+      'クライアントに基づきゲームサーバーを {server} に自動切り替えしました',
+    bettergiServerMismatchWarning:
+      '選択したサーバー（{server}）と現在のゲームクライアント（{channel}）が一致せず、タスクは正常に実行できません。どちらかを調整してください',
+    bettergiChannelOfficial: '中国公式',
+    bettergiChannelBili: 'B鯖',
+    bettergiChannelGlobal: 'グローバル',
     bettergiPasswordHint:
       'パスワードが未入力の場合、アカウント切り替えはゲーム内のドロップダウンで行われます。パスワードログインで切り替える場合は必ず入力してください',
     bettergiEnterPasswordPlaceholder:
@@ -2712,6 +2755,13 @@ export default {
     anotherWindowTookOverBackend: '別のウィンドウがバックエンド接続を引き継ぎました',
     thisWindowStoppedReconnecting:
       'このウィンドウは再接続を停止しました。2 つのウィンドウが接続を奪い合わないようにするためです。',
+    backgroundInitDegradedTitle: '一部のバックグラウンドサービスを起動できませんでした',
+    backgroundInitFailedTitle: 'バックグラウンドサービスを起動できませんでした',
+    backgroundInitTimerStarted:
+      '定時タスクは正常に起動しました。以下の機能は再起動するまで使えない可能性があります。',
+    backgroundInitTimerNotStarted:
+      '定時タスクが起動していない可能性があり、キューは予定時刻に実行されません。アプリを再起動してください。',
+    backgroundInitFailedSteps: '失敗した項目：{steps}',
     couldNotAddAccount: 'アカウントグループを追加できませんでした',
     gotIt: '了解',
     continueDownload: 'ダウンロードを続ける',
@@ -3043,6 +3093,7 @@ export default {
     },
     toast: {
       tabAutoCreated: 'コンソール {title} を自動作成しました',
+      tabReused: 'コンソール {title} で実行を開始しました',
       mainTabUndeletable: 'メインコンソールは閉じられません',
       tabDeleted: 'コンソール「{title}」を閉じました',
       noIdleTabs: '閉じられるコンソールがありません',
