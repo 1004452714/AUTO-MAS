@@ -1745,6 +1745,7 @@ export default {
     bettergiUpdateUnsupportedHint:
       'Only the official (CN) and global clients are supported (Asia / Europe / America / TW-HK-MO). For the Bilibili client, please use the official launcher',
     bettergiUpdateProgressTitle: 'Genshin client update progress',
+    bettergiUpdateUpToDate: 'Already up to date; no update needed',
     bettergiWillBeUpdated:
       'The Genshin client used by this user will be checked and updated with official incremental patches. The update may download several GB, so make sure the game is not running',
     bettergiUpdateFailed: 'Genshin update failed: {p0}',

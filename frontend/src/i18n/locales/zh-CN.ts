@@ -1669,6 +1669,7 @@ export default {
     bettergiUpdateUnsupportedHint:
       '仅支持官服与国际服客户端（亚服/欧服/美服/港澳台服）；B服请用官方启动器更新',
     bettergiUpdateProgressTitle: '原神客户端更新进度',
+    bettergiUpdateUpToDate: '当前为最新版本，无需更新',
     bettergiWillBeUpdated:
       '将检查该用户所用的原神客户端并应用官方增量包，更新过程可能下载数 GB 数据，请确保游戏未在运行',
     bettergiUpdateFailed: '原神更新失败: {p0}',

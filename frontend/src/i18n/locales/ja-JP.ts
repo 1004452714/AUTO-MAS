@@ -1678,6 +1678,7 @@ export default {
     bettergiUpdateUnsupportedHint:
       '官服と国際服クライアント（アジア／ヨーロッパ／アメリカ／港澳台）のみ対応しています。Bサーバーは公式ランチャーをご利用ください',
     bettergiUpdateProgressTitle: '原神クライアント更新の進捗',
+    bettergiUpdateUpToDate: '最新バージョンのため、更新は不要です',
     bettergiWillBeUpdated:
       'このユーザーが使う原神クライアントを確認し、公式の差分パッケージを適用します。数 GB のダウンロードが発生する場合があるため、ゲームが起動していないことを確認してください',
     bettergiUpdateFailed: '原神の更新に失敗しました: {p0}',
