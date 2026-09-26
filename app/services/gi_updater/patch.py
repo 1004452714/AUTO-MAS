@@ -149,8 +149,15 @@ def build_patch_assets(
         ``(待处理明细, 待删旧文件)``。
 
     Raises:
-        UpdaterError: 点名了却缺本机基线的分片信息——漏掉这个文件还照样写版本号，会产出
-            「混装却标新版」的客户端。
+        UpdaterError: 差分清单给本基线登了条目却没有分片坐标——这是自相矛盾的数据，
+            照它下载会取到别处的内容，宁可停手。
+
+    Note:
+        差分清单点的是**目标版本的全部文件**，但只给「相对本基线确实要动」的那些带上基线
+        条目：实测 7.0.0 -> 7.1.0 点名 2744 个，其中带 7.0.0 分片的只有 1151 个（约 10 GB），
+        其余 1430 个只覆盖 6.7.0、1314 个连 AssetInfos 都是空的，合计 84.7 GiB。空着的那些
+        就是「相对本基线没变」，既不下载也不写任何东西 —— 把它们当成缺分片而停手，每一次
+        真实更新都算不出计划。
     """
     target_index = {
         asset.asset_name: asset for asset in target_assets if not asset.is_directory
@@ -164,8 +171,10 @@ def build_patch_assets(
             # 差分点名但目标清单没有：文件被淘汰，交给待删清单处理
             continue
         info = _pick_info(entry, baseline)
-        if info is None or not info.chunks:
-            raise UpdaterError(f"差分清单缺少基线 {baseline} 的分片信息: {name}")
+        if info is None:
+            continue
+        if not info.chunks:
+            raise UpdaterError(f"差分清单里 {name} 的基线 {baseline} 有条目却没有分片")
         chunk = info.chunks[0]
         assets.append(
             PatchAsset(
