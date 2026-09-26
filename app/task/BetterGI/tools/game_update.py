@@ -16,14 +16,21 @@
 #   You should have received a copy of the GNU Affero General Public License
 #   along with AUTO-MAS. If not, see <https://www.gnu.org/licenses/>.
 
-"""BetterGI 启动前的原神客户端更新。
+"""BetterGI 的原神客户端更新。
 
 原神客户端由 BetterGI 自己启停，MAS 这边只经 ``game_info`` 拿到生效的游戏程序
 路径（用户级 ``Switch.GamePath`` 优先，否则透传 BGI 全局配置），**不读 BGI 的其他
 私有状态**。
 
 本文件只做「读配置 → 判渠道 → 推调度台 → 决定是否继续任务」，查版本、下载、打补丁
-与落盘都在 :mod:`app.services.genshin_updater`。行为策略：
+与落盘都在 :mod:`app.services.genshin_updater`。两种入口共用同一条判定链：
+
+- **自动入口**（:func:`ensure_game_updated` 默认）：任务启动游戏前按 ``Game.IfAutoUpdate``
+  开关检查，查不到/环境不允许就放行，确知需要更新却做不了才阻断；
+- **手动入口**（``manual=True``）：脚本配置页「检查更新」用户主动触发，跳过开关，
+  凡 MAS 无法自动完成的都直接抛错，由用户自己决定后续处理。
+
+两种入口共同的行为策略：
 
 - **只自动应用增量包**；拿不到差分（全新安装、逐文件全量比对）就**停手并明确指出**，
   建议用户用官方启动器——无人值守的任务不该顺手吃掉几十 GB；
@@ -81,19 +88,29 @@ async def ensure_game_updated(
     user_config: BetterGIUserConfig,
     *,
     on_log: LogHook | None = None,
+    manual: bool = False,
 ) -> bool:
-    """启动游戏前检查并按需做原神客户端增量更新。
+    """检查并按需做原神客户端增量更新。
 
     Args:
         script_config: BetterGI 脚本配置。
         user_config: 当前用户配置（游戏路径可能被用户级覆盖）。
         on_log: 一行进度文案的回调。
+        manual: 是否为脚本配置页「检查更新」手动触发。``True`` 时忽略
+            ``Game.IfAutoUpdate`` 开关，且凡 MAS 无法自动完成的都抛
+            ``RuntimeError``——用户主动发起就该得到明确的失败原因，而不是
+            像自动流程那样静默放行。
 
     Returns:
         是否可以继续本次任务。``False`` 表示需要用户先处理——要么本次只能全量更新
-        （已在调度台说明），要么更新确认需要却失败。
+        （已在调度台说明），要么更新确认需要却失败。``manual=True`` 时不会返回
+        ``False``，这类情况一律抛错。
+
+    Raises:
+        RuntimeError: ``manual=True`` 且无法自动完成时（路径/渠道不可用、游戏运行中、
+            无法判定、非增量、补丁工具缺失、执行失败）。
     """
-    if not script_config.get("Game", "IfAutoUpdate"):
+    if not manual and not script_config.get("Game", "IfAutoUpdate"):
         # 开关没开是常态，什么都不写
         return True
 
@@ -102,11 +119,17 @@ async def ensure_game_updated(
     try:
         game_exe = game_info.resolve_game_exe(root_path, user_game_path)
     except Exception as error:  # noqa: BLE001
+        if manual:
+            raise RuntimeError(f"无法确定游戏路径：{error}") from error
         logger.warning("原神更新：解析游戏路径失败，本轮跳过 - {}", error)
         return True
 
     channel = game_info.detect_channel(game_exe)
     if channel == game_info.CHANNEL_BILIBILI:
+        if manual:
+            raise RuntimeError(
+                f"{channel}客户端（{game_exe}）不在自动更新支持范围，请用官方启动器更新"
+            )
         await _report(
             on_log,
             f"原神更新：{channel}客户端（{game_exe}）不在自动更新支持范围，请用官方启动器更新",
@@ -115,11 +138,17 @@ async def ensure_game_updated(
 
     region = _CHANNEL_TO_REGION.get(channel or "")
     if region is None:
+        if manual:
+            raise RuntimeError(
+                f"未能识别客户端渠道（{game_exe}），请用官方启动器确认版本"
+            )
         logger.warning("原神更新：未能识别客户端渠道（{}），本轮跳过", game_exe)
         return True
 
     running = game_info.find_running_game_exe(_LOCAL_PROCESS_NAMES)
     if running is not None:
+        if manual:
+            raise RuntimeError(f"检测到游戏正在运行（{running}），请先完全退出游戏")
         await _report(
             on_log, f"原神更新：检测到游戏正在运行（{running}），跳过更新以免写坏文件"
         )
@@ -128,17 +157,27 @@ async def ensure_game_updated(
     plan = await plan_update(game_exe.parent, region=region)
 
     if plan.kind is UpdateKind.NOOP:
-        logger.info("原神客户端已是最新（{}）", plan.local_version)
+        if manual:
+            await _report(on_log, f"原神客户端已是最新（{plan.local_version or '?'}）")
+        else:
+            logger.info("原神客户端已是最新（{}）", plan.local_version)
         return True
     if plan.kind is UpdateKind.PRELOAD:
         await _report(on_log, f"原神更新：{plan.message}")
         return True
     if plan.kind is UpdateKind.UNKNOWN:
+        if manual:
+            raise RuntimeError(f"无法判定是否需要更新：{plan.message}")
         logger.warning("原神更新：无法判定是否需要更新，本轮跳过 - {}", plan.message)
         return True
 
     if plan.kind is not UpdateKind.PATCH:
         # 增量之外的种类必须明确指出，绝不静默执行全量
+        if manual:
+            raise RuntimeError(
+                f"原神客户端需要{KIND_LABELS[plan.kind]}（{plan.local_version or '?'} -> "
+                f"{plan.remote_version or '?'}）：MAS 只自动应用增量包，请用官方启动器更新"
+            )
         await _report(
             on_log,
             f"原神客户端需要{KIND_LABELS[plan.kind]}（{plan.local_version or '?'} -> "
@@ -150,6 +189,8 @@ async def ensure_game_updated(
     try:
         hpatchz = await ensure_hpatchz(on_progress=on_log)
     except Exception as error:  # noqa: BLE001
+        if manual:
+            raise RuntimeError(f"获取增量补丁工具失败（{error}）") from error
         await _report(on_log, f"原神更新：获取增量补丁工具失败（{error}），已停止")
         return False
 
@@ -165,5 +206,7 @@ async def ensure_game_updated(
         )
         return True
 
+    if manual:
+        raise RuntimeError(f"更新未完成：{result.message}")
     await _report(on_log, f"原神客户端更新未完成：{result.message}")
     return False
