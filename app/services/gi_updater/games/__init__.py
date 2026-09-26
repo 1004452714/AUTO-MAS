@@ -26,14 +26,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional
 
-from app.services.gi_updater.api.client import HttpClient
-from app.services.gi_updater.api.launcher_api import LauncherApi
-from app.services.gi_updater.api.profiles import PresetConfig, get_profile
-from app.services.gi_updater.common.logging import get_logger
-from app.services.gi_updater.common.progress import ProgressBase
-from app.services.gi_updater.games.genshin import GenshinInstaller
+from app.services.gi_updater.api import HttpClient, LauncherApi
+from app.services.gi_updater.common import ProgressBase, get_logger
+from app.services.gi_updater.games.genshin import (
+    GameTypeGenshinVersion,
+    GenshinInstaller,
+)
 from app.services.gi_updater.install import InstallManagerBase, UpdatePlan
-from app.services.gi_updater.versioning import GameTypeGenshinVersion, GameVersionBase
+from app.services.gi_updater.presets import PresetConfig, get_profile
+from app.services.gi_updater.versioning import GameVersionBase
 
 __all__ = [
     "GameUpdater",

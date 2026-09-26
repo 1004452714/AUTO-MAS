@@ -16,15 +16,19 @@
 #   You should have received a copy of the GNU Affero General Public License
 #   along with AUTO-MAS. If not, see <https://www.gnu.org/licenses/>.
 
-"""原神各区服的预设（Profile）：端点与 launcher 三元组。
+"""每款游戏每个区服的预设（Profile）：端点与 launcher 三元组。
 
-内置的是公开的 HYP Connect（HoYoPlay）端点与公开已知的
-launcher_id / game_id / biz 三元组：
+``PROFILES`` 以 ``(游戏短名, 区服)`` 为键，是新增游戏时的第一处落点。
+
+内置的是公开的 HYP Connect（HoYoPlay）端点与公开已知的 launcher_id / game_id /
+biz 三元组：
 
     资源包   /hyp/hyp-connect/api/getGamePackages
     分支     /hyp/hyp-connect/api/getGameBranches
     构建     /downloader/sophon_chunk/api/getBuild        （全量清单，只收 GET）
     差分     /downloader/sophon_chunk/api/getPatchBuild   （差分清单，只收 POST）
+
+两端的方法不可互换，发错一端就是 405（真机实测）。
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ __all__ = [
     "PROFILES",
     "get_profile",
 ]
+
 
 # --------------------------------------------------------------------------- #
 # 枚举（/ LauncherType）

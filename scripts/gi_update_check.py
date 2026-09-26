@@ -8,8 +8,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.gi_updater import create_updater  # noqa: E402
-from app.services.gi_updater.common.progress import summarize_size  # noqa: E402
+from app.services.gi_updater.common import summarize_size
+from app.services.gi_updater.games import create_updater
 
 
 async def probe(region: str, game_dir: str) -> dict:
