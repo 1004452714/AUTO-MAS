@@ -1166,15 +1166,6 @@ export default {
     genshinUpdateAuto: 'Auto-update Genshin (Bilibili server not supported)',
     genshinUpdateAutoHint:
       'MAS checks the version and finishes downloading and installing on its own before the task starts the game, so the official launcher is not needed. Only incremental patches are applied automatically; when none is available it stops and defers to the official launcher. Bilibili server is not supported, update it with the official launcher',
-    genshinUpdateExe: 'Game directory',
-    genshinUpdateExeHint:
-      'Only YuanShen.exe and GenshinImpact.exe are accepted; the install folder is its parent directory and the server is decided from the file name. Bilibili server is not supported, update it with the official launcher',
-    genshinUpdateExePlaceholder: 'Select YuanShen.exe or GenshinImpact.exe',
-    genshinUpdateExePick: 'Select location',
-    genshinUpdateExeRejected: 'Only YuanShen.exe or GenshinImpact.exe can be selected',
-    genshinUpdateTimeLimit: 'Update time limit (min)',
-    genshinUpdateTimeLimitHint:
-      'The round is aborted once it runs over; finished files stay, so the next run resumes',
     waitAfterLaunchSeconds: 'Wait after launch (seconds)',
     launchMode: 'Launch mode',
     howLongWaitAfter2: 'How long to wait after the game launches',
