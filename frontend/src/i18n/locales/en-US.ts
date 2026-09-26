@@ -1760,6 +1760,18 @@ export default {
     bettergiControllerCloud: 'PC - Cloud Genshin (not implemented)',
     bettergiControllerDesktopClone: 'PC - desktop clone (not implemented)',
     bettergiCloseGameOnFinish: 'Close the game when the task finishes',
+    bettergiCheckUpdateTitle: 'Check the Genshin client for updates',
+    bettergiUpdateUnsupportedHint:
+      'Only the official (CN) and global clients are supported (Asia / Europe / America / TW-HK-MO). For the Bilibili client, please use the official launcher',
+    bettergiUpdateProgressTitle: 'Genshin client update progress',
+    bettergiWillBeUpdated:
+      'The Genshin client used by this user will be checked and updated with official incremental patches. The update may download several GB, so make sure the game is not running',
+    bettergiUpdateFailed: 'Genshin update failed: {p0}',
+    bettergiUpdateTask: 'The Genshin update task finished',
+    bettergiUpdateTimed: 'The Genshin update timed out and was stopped',
+    bettergiUpdateConnecting: 'Connecting to the update task...',
+    bettergiUpdateStartFailed: 'Could not start the Genshin update',
+    bettergiUpdateStopFailed: 'Could not stop the Genshin update',
     bettergiCloseGameOnFinishHint: 'Whether to close the game once the task has finished running',
     bettergiRetryLimitHint: 'Give up once this many attempts have failed',
     bettergiRunTimeoutHint: 'Treated as a timeout when the log stops changing for this long',

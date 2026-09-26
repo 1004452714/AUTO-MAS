@@ -30,6 +30,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.services.gi_updater.common import AbortHook
+from app.services.gi_updater.install import UpdateKind
 from app.services.gi_updater.pipeline import (
     ProgressHook,
     UpdateResult,
@@ -38,7 +39,12 @@ from app.services.gi_updater.pipeline import (
 )
 from app.services.gi_updater.presets import GameKey
 
-__all__ = ["GenshinUpdateResult", "detect_genshin_region", "update_genshin_client"]
+__all__ = [
+    "GenshinUpdateResult",
+    "UpdateKind",
+    "detect_genshin_region",
+    "update_genshin_client",
+]
 
 #: 一轮原神客户端更新的结论——类型与名字沿用宿主既有调用方
 GenshinUpdateResult = UpdateResult
