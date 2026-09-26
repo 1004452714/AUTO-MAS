@@ -16,11 +16,9 @@
 #   You should have received a copy of the GNU Affero General Public License
 #   along with AUTO-MAS. If not, see <https://www.gnu.org/licenses/>.
 
-"""
-Sophon 差分更新 —— 与
-``SophonPatchAsset.Update.cs``。
+"""Sophon 差分清单解析与补丁落盘。
 
-差分链路（/ ``StartAlterSophonPatch``）::
+差分链路（上游的 ``StartAlterSophonPatch``）::
 
     getBuild（patch 分支，带 versionUpdateFrom）
         ├─ patch 清单 protobuf：patch_assets[] / unused_assets[]
@@ -33,10 +31,15 @@ Sophon 差分更新 —— 与
         └───────────────┴──────────────────────────────────────────┘
         另有 unused_assets[] -> Remove（删除旧文件）
 
-关于 HDiff：
-没有内建的等价实现，本模块采用**可插拔补丁器**：
-    * 优先调用外部 ``hpatchz`` 可执行文件
-    * 若不可用，抛 ``HDiffUnavailableError`` 并把待处理项交给上层告警
+关于 HDiff：没有内建的等价实现，本模块采用**可插拔补丁器**——优先调用外部
+``hpatchz`` 可执行文件，若不可用则抛 ``HDiffUnavailableError`` 并把待处理项交给
+上层告警。
+
+**旧文件缺失或与差分基线不符时降级为整文件下载，是本模块刻意的产品口径**（见
+:meth:`SophonPatcher._patch_hdiff`），不是漏了校验：MAS 侧只更新已装客户端，基线
+不匹配时 hpatchz 必然失败，取整文件比停手更贴近用户预期。
+
+本模块是协议层，不含任何游戏知识。
 """
 
 from __future__ import annotations
@@ -49,11 +52,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from app.services.gi_updater.api.client import HttpClient
-from app.services.gi_updater.common.logging import get_logger
-from app.services.gi_updater.common.progress import ProgressBase
-from app.services.gi_updater.download.protobuf import parse_sophon_patch
-from app.services.gi_updater.download.sophon import (
+from app.services.gi_updater.api import HttpClient
+from app.services.gi_updater.common import (
+    ProgressBase,
+    UpdateAborted,
+    get_logger,
+)
+from app.services.gi_updater.sophon import (
     SophonAsset,
     SophonChunkManifestInfoPair,
     SophonChunksInfo,
@@ -61,9 +66,10 @@ from app.services.gi_updater.download.sophon import (
     SophonManifest,
     _BytesStream,
     _resolve_target_path,
+    decompress,
+    iter_decompress,
+    parse_sophon_patch,
 )
-from app.services.gi_updater.download.zstd import decompress, iter_decompress
-from app.services.gi_updater.errors import UpdateAborted
 
 __all__ = [
     "SophonPatchMethod",
@@ -74,6 +80,7 @@ __all__ = [
     "ExternalHDiffPatcher",
     "build_patch_assets",
 ]
+
 
 #: HDiff 补丁文件的魔数
 HDIFF_MAGIC = b"HDIFF"
