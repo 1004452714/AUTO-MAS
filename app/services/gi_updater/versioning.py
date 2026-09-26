@@ -40,7 +40,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Iterable, List, Optional, Tuple
 
-from app.services.gi_updater.api import LauncherApi
 from app.services.gi_updater.common import (
     PROFILE_SECTION,
     VERSION_SECTION,
@@ -295,24 +294,21 @@ class GameVersionBase:
     def __init__(
         self,
         preset: PresetConfig,
-        launcher_api: Optional[LauncherApi] = None,
         game_path: Optional[str] = None,
     ) -> None:
         """初始化版本管理实例并惰性加载本地 ``config.ini``。
 
         Args:
             preset: 启动器 profile 配置（`PresetConfig`），提供可执行名 / 频道 / 区域等。
-            launcher_api: 已初始化的 `LauncherApi`（含远程版本与 Sophon 分支）；
-                传 ``None`` 时本实例只能读本地状态、算不出远程版本。
             game_path: 游戏安装根目录；非空时立即调用 `update_game_path` 载入 ini
                 （``save=False``，构造阶段不写盘）。
 
         Note:
             仅建立内存态与 ini 句柄；真正写盘发生在 `update_game_path` /
-            `update_game_version` 等显式调用时。
+            `update_game_version` 等显式调用时。远程版本由调用方填进
+            :attr:`remote_tag`，本类自己不联网。
         """
         self.preset = preset
-        self.launcher_api = launcher_api
         self.logger = get_logger()
 
         #: 游戏安装目录
@@ -465,129 +461,27 @@ class GameVersionBase:
 
     # ------------------------------------------------------------ 远程版本
 
-    @property
-    def sophon_branch(self):
-        """主版本 Sophon 分支（`launcher_api.sophon_branches.main`）。
+    #: 分支接口给出的原始版本串，由 :func:`~app.services.gi_updater.api.fetch_branches`
+    #: 的调用方填进来。必须是**原始 3 段串**（如 ``7.0.0``）：差分清单以它为键查分片，
+    #: 补成 4 段（``7.0.0.0``）会被服务端以 ``-202 not found`` 拒绝。
+    remote_tag: str = ""
+    #: 预下载分支的原始版本串；官方没开预下载时为空串
+    preload_tag: str = ""
 
-        Returns:
-            Optional[...]: 分支对象；`launcher_api` 未初始化或尚无 Sophon 数据时返回 ``None``。
-
-        Note:
-            其 ``tag`` 是 API 返回的原始 3 段版本串（如 ``7.0.0``），`latest_version`
-            直接解析它，切勿补成 4 段（服务端会以 ``-202 not found`` 拒绝）。
-        """
-        if self.launcher_api is None or self.launcher_api.sophon_branches is None:
-            return None
-        return self.launcher_api.sophon_branches.main
-
-    @property
-    def sophon_preload_branch(self):
-        """预下载 Sophon 分支（`launcher_api.sophon_branches.pre_download`）。
-
-        Returns:
-            Optional[...]: 预下载分支；无预下载或 API 未初始化时返回 ``None``。
-
-        Note:
-            与 `sophon_branch` 同源，仅在游戏开放预下载期间非空；
-            其 ``tag`` 同样是原始 3 段版本串。
-        """
-        if self.launcher_api is None or self.launcher_api.sophon_branches is None:
-            return None
-        return self.launcher_api.sophon_branches.pre_download
-
-    @property
-    def zip_package(self):
-        """主版本 zip 资源包（`resource_package.main_package`）。
-
-        Returns:
-            Optional[HypPackageData]: 全量 / 差分 zip 包元数据；API 未初始化或无数据时
-                返回 ``None``（此时 `latest_version` 只能依赖 Sophon）。
-
-        Note:
-            自原神 5.6 起官方不再提供 zip 包，该字段可能为 ``None``，
-            因此远程版本判定以 Sophon 为主、zip 为辅。
-        """
-        if self.launcher_api is None or self.launcher_api.resource_package is None:
-            return None
-        return self.launcher_api.resource_package.main_package
-
-    @property
-    def zip_preload_package(self):
-        """预下载 zip 资源包（`resource_package.pre_download`）。
-
-        Returns:
-            Optional[HypPackageData]: 预下载 zip 包；无预下载或 API 未初始化时返回 ``None``。
-        """
-        if self.launcher_api is None or self.launcher_api.resource_package is None:
-            return None
-        return self.launcher_api.resource_package.pre_download
+    def apply_branches(self, main_tag: str, preload_tag: str = "") -> None:
+        """记下分支接口给出的两个原始版本串。"""
+        self.remote_tag = main_tag or ""
+        self.preload_tag = preload_tag or ""
 
     @property
     def latest_version(self) -> Optional[GameVersion]:
-        """远程最新版本。
-
-        综合 Sophon 分支 ``tag`` 与 zip 包的 ``current_version`` 取较大者：
-        若 Sophon 版本更高则返回 Sophon，否则返回两者中非空的那一个
-        （Sophon 与 zip 相等时偏 Sophon）。
-
-        Returns:
-            解析出的版本；Sophon 与 zip 双双缺失时返回 ``None``
-                （表示拿不到远程版本）。
-
-        Note:
-            自原神 5.6 起官方只发 Sophon、不再提供 zip 包，zip 的 major 可能滞后甚至
-            被伪造，因此以 Sophon 为主、zip 为辅。Sophon ``tag`` 必须是 API 返回的
-            **原始 3 段版本串**（如 ``7.0.0``）；补成 4 段（``7.0.0.0``）会被服务端以
-            ``-202 not found`` 拒绝。
-        """
-        version_from_sophon = (
-            GameVersion.parse(self.sophon_branch.tag) if self.sophon_branch else None
-        )
-        version_from_zip = (
-            GameVersion.parse(self.zip_package.current_version.version)
-            if self.zip_package and self.zip_package.current_version
-            else None
-        )
-
-        if (
-            version_from_sophon is not None
-            and version_from_zip is not None
-            and version_from_sophon > version_from_zip
-        ):
-            return version_from_sophon
-        return version_from_sophon or version_from_zip
+        """远程最新版本；还没拉过分支时为 ``None``。"""
+        return GameVersion.parse(self.remote_tag)
 
     @property
     def preload_version(self) -> Optional[GameVersion]:
-        """远程预下载版本。
-
-        与 `latest_version` 同源，只是换成预下载分支 / 预下载 zip 包；
-        取 Sophon 与 zip 的较大者。
-
-        Returns:
-            有预下载时返回版本，否则 ``None``。
-
-        Note:
-            仅当官方开放预下载期间非空（见 `is_game_has_preload`）；
-            Sophon ``tag`` 同样是原始 3 段版本串。
-        """
-        version_from_sophon = (
-            GameVersion.parse(self.sophon_preload_branch.tag)
-            if self.sophon_preload_branch
-            else None
-        )
-        version_from_zip = (
-            GameVersion.parse(self.zip_preload_package.current_version.version)
-            if self.zip_preload_package and self.zip_preload_package.current_version
-            else None
-        )
-        if (
-            version_from_sophon is not None
-            and version_from_zip is not None
-            and version_from_sophon > version_from_zip
-        ):
-            return version_from_sophon
-        return version_from_sophon or version_from_zip
+        """远程预下载版本；官方没开预下载时为 ``None``。"""
+        return GameVersion.parse(self.preload_tag)
 
     # ================================================================== 状态
 
@@ -652,48 +546,7 @@ class GameVersionBase:
 
     def is_game_has_preload(self) -> bool:
         """是否存在可用的预下载版本。"""
-        if self.is_use_sophon():
-            return self.sophon_preload_branch is not None
-        return bool(
-            self.zip_preload_package and self.zip_preload_package.current_version
-        )
-
-    def is_use_sophon(self) -> bool:
-        """版本侧「是否具备 / 应使用 Sophon」的能力判定。
-
-        判定顺序：
-            1. `preset.launcher_resource_chunks_url` 为 ``None``（无分块资源地址）
-               -> 直接 ``False``（根本用不了 Sophon）；
-            2. `preset.is_force_redirect_to_sophon` 为真 -> ``True``（强制重定向）；
-            3. 否则看 `launcher_api.is_force_redirect_to_sophon`（服务端假版本触发）。
-
-        Returns:
-            上述逻辑结果。
-
-        Note:
-            实际的「用户是否关闭 / 是否存在 ``@DisableSophon`` 文件」等运行期开关
-            在 install 层叠加，本方法只负责「能力与强制」这一半。
-        """
-        if self.preset.launcher_resource_chunks_url is None:
-            return False
-        if self.preset.is_force_redirect_to_sophon:
-            return True
-        return (
-            self.launcher_api is not None
-            and self.launcher_api.is_force_redirect_to_sophon
-        )
-
-    def is_force_redirect_to_sophon(self) -> bool:
-        """是否「强制」走 Sophon（能力判断为真 **且** profile 显式开启强制）。
-
-        Returns:
-            ``is_use_sophon() and preset.is_force_redirect_to_sophon``。
-
-        Note:
-            其中的强制标志由 `LauncherApi._initialize_fake_version_info` 在
-            服务端下发假版本信息时设置，用于把原本走 zip 的游戏也重定向到 Sophon。
-        """
-        return self.is_use_sophon() and self.preset.is_force_redirect_to_sophon
+        return bool(self.preload_tag)
 
     def get_state(self) -> GameInstallStateEnum:
         """唯一的安装态判定入口。

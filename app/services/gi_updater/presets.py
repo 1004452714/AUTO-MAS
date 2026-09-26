@@ -176,26 +176,9 @@ class PresetConfig:
     # API 端点
     api_base: str = ""
     downloader_base: str = ""
-    launcher_resource_url: str = ""
     launcher_resource_chunks_url: Optional[SophonChunkUrls] = None
 
-    # 开关
-    #: 是否强制走 Sophon（原神自 5.6 起已无 zip 包）
-    is_force_redirect_to_sophon: bool = False
-
     # ------------------------------------------------------------------ 派生
-
-    @property
-    def game_packages_url(self) -> str:
-        """``getGamePackages`` 完整 URL。
-
-        基于 ``api_base`` 拼接 ``/hyp/hyp-connect/api/getGamePackages``，并带
-        ``launcher_id`` 与 ``game_ids[]`` 查询参数。
-        """
-        return (
-            f"{self.api_base}/hyp/hyp-connect/api/getGamePackages"
-            f"?launcher_id={self.launcher_id}&game_ids[]={self.game_id}"
-        )
 
     @property
     def game_branches_url(self) -> str:
@@ -315,7 +298,6 @@ def _build_profiles() -> Dict[Tuple[str, str], PresetConfig]:
 
     按 ``(游戏短名, 区服)`` 建一份 ``PresetConfig``；目前只登记了原神的官服与
     国际服两条。
-    并补全 ``launcher_resource_url``（回退为 getGamePackages 端点）。
 
     Returns:
         以 ``(game, region)`` 为键的预设字典；随后被赋给模块级 ``PROFILES``。
@@ -335,7 +317,6 @@ def _build_profiles() -> Dict[Tuple[str, str], PresetConfig]:
         api_base=_CN_API,
         downloader_base=_CN_DL,
         # 5.6 起官方移除 zip 包，本预设强制走 Sophon
-        is_force_redirect_to_sophon=True,
     )
     profiles[(GameKey.Genshin, Region.CN)].launcher_resource_chunks_url = _sophon_urls(
         _CN_DL
@@ -352,14 +333,10 @@ def _build_profiles() -> Dict[Tuple[str, str], PresetConfig]:
         executable_name="GenshinImpact.exe",
         api_base=_GLB_API,
         downloader_base=_GLB_DL,
-        is_force_redirect_to_sophon=True,
     )
     profiles[
         (GameKey.Genshin, Region.GLOBAL)
     ].launcher_resource_chunks_url = _sophon_urls(_GLB_DL)
-
-    for preset in profiles.values():
-        preset.launcher_resource_url = preset.game_packages_url
 
     return profiles
 

@@ -25,16 +25,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
-from app.services.gi_updater.api import HttpClient, LauncherApi
-from app.services.gi_updater.common import ProgressBase, get_logger
+from app.services.gi_updater.common import AbortHook, ProgressHook, get_logger
 
 # 导入即登记：每个游戏模块在自己文件末尾调 ``register``；加新游戏就在此追加一行
 from app.services.gi_updater.games import genshin as _genshin  # noqa: F401
 from app.services.gi_updater.games.spec import GameSpec, get_spec
 from app.services.gi_updater.install import (
     InstallManagerBase,
+    InstallResult,
     UpdateKind,
     UpdatePlan,
 )
@@ -56,52 +56,32 @@ class GameUpdater:
     preset: PresetConfig
     version_manager: GameVersionBase
     installer: InstallManagerBase
-    launcher_api: Optional[LauncherApi] = None
-    client: Optional[HttpClient] = None
-
-    # ---------------------------------------------------------------- 便捷转发
 
     @property
     def game_path(self) -> str:
-        """游戏安装根目录（转发到 ``version_manager.game_path``）。"""
+        """游戏安装根目录（代理到版本管理器）。"""
         return self.version_manager.game_path
 
-    @property
-    def profile_name(self) -> str:
-        """预设名称（转发到 ``preset.profile_name``）。"""
-        return self.preset.profile_name
+    async def check(self, client: Any) -> UpdatePlan:
+        """联网问出「这次该怎么更新」，不下载、不写盘。
 
-    def refresh(self) -> None:
-        """刷新本地版本缓存，并联网拉远程元数据。
-
-        Note:
-            installer 也持有 ``launcher_api`` 的引用，必须同步更新，
-            否则创建时未联网的实例会一直拿到 ``None``。
-        """
-        self.version_manager.reload()
-        self.launcher_api = LauncherApi.load(self.preset, self.client or HttpClient())
-        self.version_manager.launcher_api = self.launcher_api
-        self.installer.launcher_api = self.launcher_api
-
-    def check(self) -> UpdatePlan:
-        """检查更新：联网拉元数据并算出计划，不下载、不写盘。
+        Args:
+            client: 调用方创建并负责的异步 HTTP 客户端。
 
         Returns:
-            计划的完整结果（含 ``kind`` / 目标版本 / 资产清单等）。联网问不出
-            结论时不抛异常，而是给出 ``kind=Unknown`` 并带上原因。
+            :class:`UpdatePlan`。问不出结论时不抛异常，给出 ``kind=Unknown`` 并带上原因。
 
         Note:
-            兜住的是协议层：HTTP 失败、响应信封不是对象、``retcode`` 非 0、清单
-            缺项、zstd 与 protobuf 解不开。这些都只说明「这次问不出来」，不代表
-            用户的客户端坏了，也不该让调度任务失败——区服写错在进入本方法之前
-            就已经报错，不会被这里吞掉。
+            兜住的是协议层：HTTP 失败、响应信封不是对象、``retcode`` 非 0、清单缺项、
+            zstd 与 protobuf 解不开。这些都只说明「这次问不出来」，不代表用户的客户端
+            坏了，也不该让调度任务失败。区服写错在 :func:`create_updater` 里就报了，
+            不会被这里吞掉。
         """
         try:
-            self.refresh()
-            return self.installer.build_plan()
-        except Exception as error:  # noqa: BLE001
+            return await self.installer.build_plan(client)
+        except Exception as error:  # noqa: BLE001 —— 协议层的形状变化不止一种，逐条枚举没有意义
             self.installer.logger.warning(
-                "问不出该怎么更新，本轮按无法判定处理: {}: {}",
+                "问不出该怎么更新，本轮按无法判定处理: %s: %s",
                 type(error).__name__,
                 error,
             )
@@ -111,6 +91,24 @@ class GameUpdater:
                 message=f"{type(error).__name__}: {error}",
             )
 
+    async def execute(
+        self,
+        plan: UpdatePlan,
+        client: Any,
+        *,
+        hpatchz: Optional[str] = None,
+        on_progress: ProgressHook | None = None,
+        should_abort: AbortHook | None = None,
+    ) -> InstallResult:
+        """按计划下载并落盘。"""
+        return await self.installer.execute(
+            plan,
+            client,
+            hpatchz=hpatchz,
+            on_progress=on_progress,
+            should_abort=should_abort,
+        )
+
 
 def create_updater(
     game: str = GameKey.Genshin,
@@ -118,12 +116,7 @@ def create_updater(
     game_path: Optional[str] = None,
     *,
     profile_dir: Optional[str] = None,
-    client: Optional[HttpClient] = None,
-    progress: Optional[ProgressBase] = None,
     logger: Any = None,
-    chunk_thread_count: int = 8,
-    should_abort: Optional[Callable[[], bool]] = None,
-    hdiff_executable: Optional[str] = None,
 ) -> GameUpdater:
     """按游戏与区服装配一整套更新器。
 
@@ -132,40 +125,21 @@ def create_updater(
         region: 区服，``cn`` / ``global``。
         game_path: 游戏安装目录；``None`` 时由版本管理器自行探测。
         profile_dir: 预设/缓存目录；缺省由版本管理器自行决定。
-        client: HTTP 客户端；缺省时新建 ``HttpClient``。
-        progress: 进度对象；可为 ``None``。
-        logger: 日志对象；缺省时取模块默认 logger。
-        chunk_thread_count: 单文件分块下载线程数（默认 8）。
-        should_abort: 协作式中止判定，下载在资产与数据块边界轮询它；
-            ``None`` 表示不可中止。
-        hdiff_executable: ``hpatchz`` 可执行文件路径；缺省时按 ``PATH`` 查找。
+        logger: 日志对象；缺省时按游戏名取。
 
     Returns:
         聚合了 ``preset`` / ``version_manager`` / ``installer`` 的门面对象。
+
+    Raises:
+        ValueError: 这款游戏在该区服没有内置预设。
     """
     spec = get_spec(game)
     logger = logger or get_logger(f"{spec.display_name}更新")
     preset = get_profile(spec.key, region)
-    client = client or HttpClient(logger=logger)
 
-    version_manager = spec.version_cls(preset, None, game_path)
+    version_manager = spec.version_cls(preset, game_path)
     version_manager.profile_dir = profile_dir
-
-    installer = spec.installer_cls(
-        preset,
-        version_manager,
-        None,
-        client,
-        game_path,
-        progress=progress,
-        logger=logger,
-        chunk_thread_count=chunk_thread_count,
-    )
-    installer.should_abort = should_abort
-    installer.hdiff_executable = hdiff_executable
+    installer = spec.installer_cls(preset, version_manager, game_path, logger=logger)
     return GameUpdater(
-        preset=preset,
-        version_manager=version_manager,
-        installer=installer,
-        client=client,
+        preset=preset, version_manager=version_manager, installer=installer
     )

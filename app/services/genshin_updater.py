@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.services.gi_updater.common import AbortHook
 from app.services.gi_updater.pipeline import (
     ProgressHook,
     UpdateResult,
@@ -60,17 +61,16 @@ async def update_genshin_client(
     game_path: str | Path,
     *,
     resource: str = "自动",
-    time_limit_min: int = 0,
     on_progress: ProgressHook | None = None,
+    should_abort: AbortHook | None = None,
 ) -> GenshinUpdateResult:
     """检查并按需更新原神客户端，直到落盘完成。
 
     Args:
         game_path: 游戏安装目录（``config.ini`` 与可执行文件所在的那一级）。
         resource: 区服，``自动`` / ``官服`` / ``国际服``。
-        time_limit_min: 本轮时限（分钟）；``0`` 表示不限。超时按中止处理，
-            等下载线程真收干净了才返回。
         on_progress: 一行行进度文案的回调。
+        should_abort: 中止判定，在文件批次边界轮询；``None`` 表示不可中止。
 
     Returns:
         :class:`GenshinUpdateResult`。任何异常都转成 ``success=False`` 的结论，
@@ -80,6 +80,6 @@ async def update_genshin_client(
         GameKey.Genshin,
         game_path,
         resource=resource,
-        time_limit_min=time_limit_min,
         on_progress=on_progress,
+        should_abort=should_abort,
     )
