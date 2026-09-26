@@ -43,7 +43,9 @@ import os
 import shutil
 from typing import List, Optional
 
+from app.services.gi_updater.games.spec import GameSpec, register
 from app.services.gi_updater.install import InstallManagerBase, UpdatePlan
+from app.services.gi_updater.presets import GameKey
 from app.services.gi_updater.versioning import GameVersionBase
 
 __all__ = [
@@ -52,6 +54,7 @@ __all__ = [
     "ALTERNATIVE_EXEC_NAME",
     "GenshinInstaller",
     "LANGUAGE_STRING_TO_LOCALE",
+    "GENSHIN",
 ]
 
 
@@ -283,3 +286,15 @@ class GenshinInstaller(InstallManagerBase):
             委托 ``version.is_exec_data_dir_valid()`` 判定（混装时为 False）。
         """
         return self.version.is_exec_data_dir_valid()
+
+
+# ------------------------------------------------------------ 注册
+
+GENSHIN = register(
+    GameSpec(
+        key=GameKey.Genshin,
+        display_name="原神",
+        version_cls=GameTypeGenshinVersion,
+        installer_cls=GenshinInstaller,
+    )
+)
