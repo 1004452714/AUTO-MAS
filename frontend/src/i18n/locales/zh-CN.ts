@@ -1685,6 +1685,21 @@ export default {
     bettergiControllerCloud: '电脑端-云原神（暂未开发）',
     bettergiControllerDesktopClone: '电脑端-桌面分身（暂未开发）',
     bettergiCloseGameOnFinish: '任务结束后关闭游戏',
+    bettergiGenshinUpdate: '启动前更新原神客户端',
+    bettergiGenshinUpdateHint:
+      '任务启动游戏前，由 MAS 检查并应用官方增量包，不必再开官方启动器；拿不到差分包（全新安装或需逐文件全量比对）时会停止并提示改用官方启动器。B服请用官方启动器更新',
+    bettergiCheckUpdateTitle: '检查原神客户端更新',
+    bettergiUpdateUnsupportedHint:
+      '仅支持官服与国际服客户端（亚服/欧服/美服/港澳台服）；B服请用官方启动器更新',
+    bettergiUpdateProgressTitle: '原神客户端更新进度',
+    bettergiWillBeUpdated:
+      '将检查该用户所用的原神客户端并应用官方增量包，更新过程可能下载数 GB 数据，请确保游戏未在运行',
+    bettergiUpdateFailed: '原神更新失败: {p0}',
+    bettergiUpdateTask: '原神更新任务已结束',
+    bettergiUpdateTimed: '原神更新超时，已自动停止',
+    bettergiUpdateConnecting: '正在连接更新任务...',
+    bettergiUpdateStartFailed: '启动原神更新失败',
+    bettergiUpdateStopFailed: '停止原神更新失败',
     bettergiCloseGameOnFinishHint: '任务执行完毕后是否关闭游戏',
     bettergiRetryLimitHint: '超过该次数仍失败则终止',
     bettergiRunTimeoutHint: '日志长期无变化将判定超时',
