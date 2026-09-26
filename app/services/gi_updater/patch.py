@@ -16,863 +16,523 @@
 #   You should have received a copy of the GNU Affero General Public License
 #   along with AUTO-MAS. If not, see <https://www.gnu.org/licenses/>.
 
-"""Sophon 差分清单解析与补丁落盘。
+"""差分清单与目标清单的合并，以及单个文件的取回与落盘。
 
-差分链路（上游的 ``StartAlterSophonPatch``）::
+    差分清单点名的文件
+        ├─ 没有 original_file_name → 分片本身就是新内容（CopyOver）
+        └─ 有 original_file_name  → 分片是 ldiff 数据，打到旧文件上（Patch）
+                                        └─ 旧文件不可用 / 打补丁失败
+                                             → 按主清单整文件重建（降级）
 
-    getBuild（patch 分支，带 versionUpdateFrom）
-        ├─ patch 清单 protobuf：patch_assets[] / unused_assets[]
-        └─ 目标版本主清单（main/preload）
-                ↓ 对每个「目标清单里的 asset」判定补丁方式
-        ┌───────────────┬──────────────────────────────────────────┐
-        │ 不在 patch 里 │ DownloadOver —— 按主清单正常下载整文件    │
-        │ original 为空 │ CopyOver     —— patch chunk 就是新内容    │
-        │ original 非空 │ Patch        —— HDiff 打到旧文件上        │
-        └───────────────┴──────────────────────────────────────────┘
-        另有 unused_assets[] -> Remove（删除旧文件）
+降级判据是「拿这份基线打不出可信的新文件」：米哈游的现网差分不支持从空文件重建，旧文件
+缺了、尺寸变了、内容被改过，硬打要么直接失败、要么产出一个校验不过的坏文件。与其让一个
+文件卡住整轮更新，不如把这个文件按主清单整份重下——多花的流量只落在这一个文件上。
 
-关于 HDiff：没有内建的等价实现，本模块采用**可插拔补丁器**——优先调用外部
-``hpatchz`` 可执行文件，若不可用则抛 ``HDiffUnavailableError`` 并把待处理项交给
-上层告警。
-
-**旧文件缺失或与差分基线不符时降级为整文件下载，是本模块刻意的产品口径**（见
-:meth:`SophonPatcher._patch_hdiff`），不是漏了校验：MAS 侧只更新已装客户端，基线
-不匹配时 hpatchz 必然失败，取整文件比停手更贴近用户预期。
-
-本模块是协议层，不含任何游戏知识。
+单个文件一律先写到同目录的 ``<name>.mas-new``，校验通过再 ``os.replace`` 原子改名；中途
+失败时原文件保持原样。
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
-import shutil
 import subprocess
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from contextlib import suppress
+from dataclasses import dataclass
+from typing import Any, List, Optional, Sequence, Tuple
 
-from app.services.gi_updater.api import HttpClient
-from app.services.gi_updater.common import (
-    ProgressBase,
-    UpdateAborted,
-    get_logger,
-)
+from app.services.gi_updater.api import fetch_range, request_bytes
+from app.services.gi_updater.common import UpdaterError, get_logger, safe_join
 from app.services.gi_updater.sophon import (
-    SophonAsset,
-    SophonChunkManifestInfoPair,
-    SophonChunksInfo,
-    SophonDownloader,
-    SophonManifest,
-    _BytesStream,
-    _resolve_target_path,
+    SophonAssetChunk,
+    SophonAssetProperty,
+    SophonPatchProto,
     decompress,
-    iter_decompress,
-    parse_sophon_patch,
 )
 
 __all__ = [
-    "SophonPatchMethod",
-    "SophonPatchAsset",
-    "SophonPatcher",
-    "HDiffUnavailableError",
-    "HDiffPatcher",
-    "ExternalHDiffPatcher",
+    "METHOD_COPYOVER",
+    "METHOD_PATCH",
+    "AssetSummary",
+    "BlobUrls",
+    "PatchAsset",
+    "apply_asset",
     "build_patch_assets",
+    "md5_file",
+    "remove_unused",
+    "summarize_assets",
 ]
 
+#: 分片本身就是新内容
+METHOD_COPYOVER = "copyover"
+#: 分片是 ldiff 数据，要打到旧文件上
+METHOD_PATCH = "patch"
 
-#: HDiff 补丁文件的魔数
-HDIFF_MAGIC = b"HDIFF"
-
-
-class HDiffUnavailableError(RuntimeError):
-    """没有可用的 HDiff 实现。"""
-
-
-class SophonPatchMethod(str, Enum):
-    """差分清单给出的四种落盘方式。"""
-
-    CopyOver = "CopyOver"
-    DownloadOver = "DownloadOver"
-    Patch = "Patch"
-    Remove = "Remove"
+#: hpatchz 单次调用的上限（秒）：它只处理一个文件，几十秒已属异常
+_HPATCHZ_TIMEOUT = 300
 
 
-@dataclass
-class SophonPatchAsset:
-    """一个目标文件与其差分处理信息。"""
+@dataclass(frozen=True)
+class PatchAsset:
+    """一个文件本轮怎么处理。"""
 
-    #: 目标版本主清单里的 asset（含完整 chunk 列表）
-    main_asset: Optional[SophonAsset] = None
-    #: 差分档案的 chunk 信息（基址与是否压缩）——取 patch 分片只能用它，
-    #: 主包 chunk 目录里没有这些分片；``DownloadOver`` 不需要，留 ``None``
-    patch_chunks_info: Optional[SophonChunksInfo] = None
-    patch_method: SophonPatchMethod = SophonPatchMethod.DownloadOver
-
-    target_file_path: str = ""
-    target_file_size: int = 0
-    target_file_hash: str = ""
-
-    #: patch chunk 的坐标（在 diff 文件里的偏移/长度）
-    patch_name_source: str = ""
-    patch_hash: str = ""
-    patch_offset: int = 0
-    patch_size: int = 0
-    patch_chunk_length: int = 0
-
-    original_file_path: str = ""
-    original_file_size: int = 0
-    original_file_hash: str = ""
-
-    matching_field: str = ""
+    name: str
+    target_size: int
+    target_md5: str
+    method: str
+    #: 差分档案里的分片名：一个 blob 供许多文件共用，所以要带偏移取一段
+    patch_name: str
+    patch_offset: int
+    patch_length: int
+    #: 补丁源文件；CopyOver 时为空串
+    original_name: str
+    original_size: int
+    original_md5: str
+    #: 主清单里该文件的全部数据块，整文件重建（降级）时用
+    chunks: Tuple[SophonAssetChunk, ...] = ()
 
     @property
-    def needs_download(self) -> bool:
-        """该补丁资产是否需要从网络下载数据。
+    def is_patch(self) -> bool:
+        """是否走 hpatchz 打补丁（否则分片即新内容）。"""
+        return self.method == METHOD_PATCH
 
-        Returns:
-            ``True`` 表示 CopyOver / Patch / DownloadOver——三者的字节都来自差分档案
-            或目标资源；只有 Remove 不需要。
-        """
-        return self.patch_method in (
-            SophonPatchMethod.DownloadOver,
-            SophonPatchMethod.CopyOver,
-            SophonPatchMethod.Patch,
-        )
+
+@dataclass(frozen=True)
+class BlobUrls:
+    """本轮取数据用到的两处基址。
+
+    差分分片只能从**差分档案自己**的基址取，主包数据块只能从主清单的基址取；两边互不
+    含对方的内容，取错边就是每个都 404。
+    """
+
+    diff_prefix: str
+    diff_compressed: bool
+    main_prefix: str
+    main_compressed: bool
 
 
 # --------------------------------------------------------------------------- #
-# 补丁清单构建
+# 清单合并
 # --------------------------------------------------------------------------- #
 
 
-def build_patch_assets(
-    client: HttpClient,
-    patch_pair: SophonChunkManifestInfoPair,
-    target_pair: SophonChunkManifestInfoPair,
-    version_update_from: str,
-    *,
-    logger: Any = None,
-) -> Tuple[List[SophonPatchAsset], List[str]]:
-    """把目标清单与差分清单合并成补丁资产列表。
+def _pick_info(asset_property: Any, baseline: str) -> Any:
+    """在差分条目里挑出本机基线对应的那份分片信息。
 
-    以差分清单点名的文件为准：每个文件按本机基线挑出对应分片，分片带
-    ``original_file_name`` 的走 hdiff 打补丁（Patch），不带的说明分片本身就是新内容
-    （CopyOver）；差分清单没点名的目标文件不动。同时收集需要删除的旧文件。
-
-    Args:
-        client: HTTP 客户端。
-        patch_pair: 差分分支清单/分片信息对。
-        target_pair: 目标版本主清单信息对。
-        version_update_from: 本机已装的基线版本串（3 段，如 ``7.0.0``）——
-            差分清单为**每个**基线都存了一份 ``asset_info``，必须按它挑，
-            拿错基线的分片会把别的版本的分片当成本次要下的量。
-        logger: 可选日志器。
-
-    Returns:
-        ``(补丁资产列表, 需要删除的旧文件路径列表)`` 二元组。
+    差分清单为每个基线版本都存了一份；拿错基线会把别的版本的分片当成本次要下的量。
     """
-    logger = logger or get_logger()
-
-    target_assets = SophonManifest.enumerate_assets(client, target_pair, logger=logger)
-    patch_proto = _fetch_patch_proto(client, patch_pair, logger=logger)
-
-    # asset_name -> 本机基线对应的那份 asset_info
-    patch_dict: Dict[str, Any] = {}
-    for asset_property in patch_proto.patch_assets:
-        info = _pick_asset_info(asset_property, version_update_from)
-        if info is None:
-            continue
-        patch_dict[asset_property.asset_name] = info
-
-    results: List[SophonPatchAsset] = []
-    target_index = {
-        asset.asset_name: asset for asset in target_assets if not asset.is_directory
-    }
-    # 只处理差分清单点名、且带本机基线分片的文件。目标清单里其余文件本机已有且内容
-    # 一致，不在这次更新范围内——把它们当成「整文件重下」会把一次约 10 GB 的增量
-    # 变成上百 GB 的全量下载。
-    for name, info in patch_dict.items():
-        asset = target_index.get(name)
-        if asset is None:
-            logger.debug("差分清单里的 %s 不在目标清单中，跳过", name)
-            continue
-
-        chunk = info.chunks[0] if info.chunks else None
-        if chunk is None or not chunk.original_file_name:
-            # patch chunk 本身就是新内容：整份新文件从差分档案里取
-            results.append(
-                SophonPatchAsset(
-                    main_asset=asset,
-                    patch_chunks_info=patch_pair.chunks_info,
-                    patch_method=SophonPatchMethod.CopyOver,
-                    target_file_path=asset.asset_name,
-                    target_file_size=asset.asset_size,
-                    target_file_hash=asset.asset_hash,
-                    patch_name_source=chunk.patch_name if chunk else "",
-                    patch_hash=chunk.patch_md5 if chunk else "",
-                    patch_offset=chunk.patch_offset if chunk else 0,
-                    patch_size=chunk.patch_size if chunk else 0,
-                    patch_chunk_length=chunk.patch_length if chunk else 0,
-                    matching_field=asset.matching_field,
-                )
-            )
-            continue
-
-        results.append(
-            SophonPatchAsset(
-                main_asset=asset,
-                patch_chunks_info=patch_pair.chunks_info,
-                patch_method=SophonPatchMethod.Patch,
-                target_file_path=asset.asset_name,
-                target_file_size=asset.asset_size,
-                target_file_hash=asset.asset_hash,
-                patch_name_source=chunk.patch_name,
-                patch_hash=chunk.patch_md5,
-                patch_offset=chunk.patch_offset,
-                patch_size=chunk.patch_size,
-                patch_chunk_length=chunk.patch_length,
-                original_file_path=chunk.original_file_name,
-                original_file_size=chunk.original_file_length,
-                original_file_hash=chunk.original_file_md5,
-                matching_field=asset.matching_field,
-            )
-        )
-
-    # unused_assets -> 待删除的旧文件（目标清单里还在用的必须留下）
-    removed = _collect_unused_assets(patch_proto, set(target_index))
-
-    return results, removed
-
-
-def _fetch_patch_proto(
-    client: HttpClient, pair: SophonChunkManifestInfoPair, logger: Any
-):
-    """下载并解析差分清单 protobuf。
-
-    Args:
-        client: HTTP 客户端（:class:`~api.client.HttpClient`）。
-        pair: 差分分支信息对，提供清单 URL 与是否压缩。
-        logger: 日志器，用于输出调试信息。
-
-    Returns:
-        解析后的 :class:`SophonPatchProto`。
-
-    Raises:
-        RuntimeError: 信息对中缺失 ``manifest_info`` 时。
-    """
-    if pair.manifest_info is None:
-        raise RuntimeError("差分清单信息缺失")
-    url = pair.manifest_info.manifest_file_url
-    logger.debug("下载 Sophon 差分清单：%s", url)
-    response = client.get(url, stream=True)
-    try:
-        if pair.manifest_info.is_use_compression:
-            raw = b"".join(
-                iter_decompress(response._stream or _BytesStream(response.content))
-            )
-        else:
-            raw = response.content
-    finally:
-        response.close()
-    return parse_sophon_patch(raw)
-
-
-def _pick_asset_info(asset_property, version_update_from: str) -> Any:
-    """从 asset 的多个 asset_info 里挑出本机基线对应的那一份。
-
-    差分清单会把**每个可升级基线**的分片都塞进同一个 asset 条目（``asset_infos``
-    里各一份，带 ``version_tag``）。服务端也是按 ``versionUpdateFrom`` 精确匹配，
-    所以这里只认版本 tag 相同的条目：tag 对不上就返回 ``None``，
-    让该文件走上层的全量下载分支，而不是拿别的基线的分片来打补丁。
-
-    Args:
-        asset_property: 差分清单里的一个 asset 属性对象，含 ``asset_infos`` 列表。
-        version_update_from: 本机基线版本串（3 段，如 ``7.0.0``），比较忽略大小写。
-
-    Returns:
-        该基线对应的 asset_info（:class:`SophonPatchAssetInfo`）；没有则 ``None``。
-    """
-    wanted = version_update_from.lower()
+    wanted = baseline.casefold()
     for info in asset_property.asset_infos:
-        if info.version_tag.lower() == wanted:
+        if info.version_tag.casefold() == wanted:
             return info
     return None
 
 
-def _collect_unused_assets(patch_proto, keep_names: Set[str]) -> List[str]:
-    """收集新版本不再引用的旧文件（``SophonUnusedAssetProperty``）。
+def build_patch_assets(
+    patch_manifest: SophonPatchProto,
+    target_assets: Sequence[SophonAssetProperty],
+    baseline: str,
+    protected: Sequence[str] = (),
+) -> Tuple[List[PatchAsset], List[str]]:
+    """把差分清单与目标清单合并成待处理明细，并收集待删文件。
+
+    以差分清单点名的文件为准，目标清单里未被点名的本轮不动——把它们也算成「要下」的话，
+    一次约 10 GB 的增量会被报成上百 GB 的全量。
 
     Args:
-        patch_proto: 已解析的差分清单协议对象，含 ``unused_assets``。
-        keep_names: 目标清单里仍然存在的文件名；命中的一律不删。
+        patch_manifest: 解析后的差分清单。
+        target_assets: 目标版本主清单的文件条目。
+        baseline: 本机已装的基线版本（原始 3 段串，如 ``7.0.0``）。
 
     Returns:
-        待删除的相对文件路径列表（已去重、保持首次出现顺序）。
+        ``(待处理明细, 待删旧文件)``。
+
+    Raises:
+        UpdaterError: 点名了却缺本机基线的分片信息——漏掉这个文件还照样写版本号，会产出
+            「混装却标新版」的客户端。
     """
-    names: List[str] = []
-    seen: Set[str] = set()
-    for unused_property in patch_proto.unused_assets:
-        for info in unused_property.asset_infos:
-            for file_entry in info.assets:
-                name = file_entry.file_name
-                if not name or name in keep_names or name in seen:
+    target_index = {
+        asset.asset_name: asset for asset in target_assets if not asset.is_directory
+    }
+    assets: List[PatchAsset] = []
+
+    for entry in patch_manifest.patch_assets:
+        name = str(entry.asset_name)
+        target = target_index.get(name)
+        if target is None:
+            # 差分点名但目标清单没有：文件被淘汰，交给待删清单处理
+            continue
+        info = _pick_info(entry, baseline)
+        if info is None or not info.chunks:
+            raise UpdaterError(f"差分清单缺少基线 {baseline} 的分片信息: {name}")
+        chunk = info.chunks[0]
+        assets.append(
+            PatchAsset(
+                name=name,
+                target_size=target.asset_size,
+                target_md5=target.asset_hash_md5,
+                method=METHOD_PATCH if chunk.original_file_name else METHOD_COPYOVER,
+                patch_name=chunk.patch_name,
+                # 要下的长度是 PatchLength：PatchSize 是整个 blob 的大小，多个文件共用
+                # 同一 blob，按文件累加会重复计数（实测把 10 GB 报成 85 GB）。
+                # CopyOver 时 PatchLength 就等于新文件的完整大小。
+                patch_offset=chunk.patch_offset,
+                patch_length=chunk.patch_length,
+                original_name=chunk.original_file_name,
+                original_size=chunk.original_file_length,
+                original_md5=chunk.original_file_md5,
+                chunks=tuple(target.asset_chunks),
+            )
+        )
+
+    return assets, collect_removals(patch_manifest, set(target_index), set(protected))
+
+
+def collect_removals(
+    patch_manifest: SophonPatchProto, in_target: set, protected: set
+) -> List[str]:
+    """收集要删除的旧文件；目标清单里仍在用的必须留下。
+
+    ``unused_assets`` 列的是「从某个基线升上来后不再被引用」的文件，跨基线混在一起，不能
+    照单全删。比对大小写不敏感：Windows 上同一文件的大小写漂移不该被当成两个。
+
+    Args:
+        patch_manifest: 解析后的差分清单。
+        in_target: 目标清单里的文件名集合。
+        protected: 无论清单怎么说都不删的名字（可执行文件与 ``config.ini``），由安装层
+            按这款游戏预设里登记的名字给出。
+    """
+    forbidden = {name.casefold() for name in protected}
+    known = {name.casefold() for name in in_target}
+    logger = get_logger()
+    removed: List[str] = []
+    for unused in patch_manifest.unused_assets:
+        for info in unused.asset_infos:
+            for item in info.assets:
+                name = str(item.file_name)
+                if not name or name.casefold() in known:
                     continue
-                seen.add(name)
-                names.append(name)
-    return names
+                if (
+                    "/" not in name
+                    and "\\" not in name
+                    and name.casefold() in forbidden
+                ):
+                    logger.warning("清单要求删除受保护的文件，已跳过: %s", name)
+                    continue
+                removed.append(name)
+    return sorted(set(removed))
+
+
+@dataclass(frozen=True)
+class AssetSummary:
+    """一轮更新的体量统计（磁盘门禁与进度分母都用它）。"""
+
+    file_count: int = 0
+    #: 本轮要从网络取的字节数：按分片段长度计；判为会降级的文件按整文件计
+    download_size: int = 0
+    patch_count: int = 0
+    copyover_count: int = 0
+    #: 单个文件更新后的最大体积——落盘峰值按它预留
+    largest_target: int = 0
+    #: 基线已不可用、预计要走整文件重下的文件数
+    downgraded: int = 0
+    #: 体积已与目标一致、预计不必下载的文件数（续传时给个人数感觉）
+    ready: int = 0
+
+
+def _stat_size(path: str) -> int:
+    """读一个文件的大小；不存在时返回 ``-1``。"""
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return -1
+
+
+async def summarize_assets(
+    assets: Sequence[PatchAsset], game_path: str
+) -> AssetSummary:
+    """把待处理明细压成体量统计。
+
+    体积按每个文件一次 ``getsize`` 预测降级与已就绪：只看尺寸不算 MD5。宁可把门禁估得
+    偏大，也不能在下载跑到一半时发现要下的其实是整包。
+    """
+
+    def inspect(asset: PatchAsset) -> Tuple[bool, bool]:
+        """返回 ``(基线已不可用, 目标体积已对上)``。"""
+        unusable = asset.is_patch and (
+            _stat_size(safe_join(game_path, asset.original_name)) != asset.original_size
+        )
+        ready = _stat_size(safe_join(game_path, asset.name)) == asset.target_size
+        return unusable, ready
+
+    verdicts = await asyncio.gather(
+        *(asyncio.to_thread(inspect, asset) for asset in assets)
+    )
+    return AssetSummary(
+        file_count=len(assets),
+        download_size=sum(
+            asset.target_size if unusable else asset.patch_length
+            for asset, (unusable, _) in zip(assets, verdicts)
+        ),
+        patch_count=sum(1 for asset in assets if asset.is_patch),
+        copyover_count=sum(1 for asset in assets if not asset.is_patch),
+        largest_target=max((asset.target_size for asset in assets), default=0),
+        downgraded=sum(1 for unusable, _ in verdicts if unusable),
+        ready=sum(1 for _, ready in verdicts if ready),
+    )
 
 
 # --------------------------------------------------------------------------- #
-# HDiff 补丁器（可插拔）
+# 单文件落盘
 # --------------------------------------------------------------------------- #
 
 
-class HDiffPatcher:
-    """HDiff 补丁器接口。"""
+def md5_file(path: str) -> str:
+    """算文件 MD5，返回 32 位小写十六进制串。"""
+    digest = hashlib.md5()
+    with open(path, "rb") as handle:
+        while block := handle.read(4 * 1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
 
-    @property
-    def available(self) -> bool:  # pragma: no cover
-        """基类默认不可用（需子类实现真正的 HDiff 后端）。
 
-        Returns:
-            ``False``；具体可用实现见 :class:`ExternalHDiffPatcher`。
-        """
+def _same_md5(wanted: str, actual: str) -> bool:
+    """清单里的 MD5 与算出来的是否一致；清单没给 MD5 时按一致处理。"""
+    return not wanted or actual == wanted.casefold()
+
+
+async def _target_is_current(target: str, asset: PatchAsset) -> bool:
+    """目标文件是否已经是本轮要更新到的内容。
+
+    先比体积（近乎免费），一致才算整文件 MD5。这是中断后接着更新的依据：上次已落盘的文件
+    本轮不必重做——不查就重做，原位补丁会拿新内容当旧文件打补丁，产物校验必败。
+    """
+    if await asyncio.to_thread(_stat_size, target) != asset.target_size:
         return False
+    return await asyncio.to_thread(md5_file, target) == asset.target_md5.casefold()
 
-    def patch(
-        self, diff_path: str, old_path: str, new_path: str
-    ) -> None:  # pragma: no cover
-        """基类默认实现：无可用 HDiff 后端，直接报错。
 
-        Args:
-            diff_path: 差分文件路径。
-            old_path: 旧文件路径。
-            new_path: 输出新文件路径。
+def _run_hpatchz(exe: str, old: str, diff: str, out: str) -> None:
+    """调 hpatchz 把差分打到旧文件上，产出新文件。
 
-        Raises:
-            HDiffUnavailableError: 始终，提示应使用子类实现。
-        """
-        raise HDiffUnavailableError("未实现 HDiff 补丁器")
-
-
-class ExternalHDiffPatcher(HDiffPatcher):
-    """调用外部 ``hpatchz``（HDiffPatch 官方 CLI）。
-
-    用法：``hpatchz [-f] <oldFile> <diffFile> <outNewFile>``
-    """
-
-    def __init__(self, executable: str = "hpatchz") -> None:
-        """记录外部 ``hpatchz`` 可执行文件名或路径。
-
-        Args:
-            executable: ``hpatchz`` 命令名或绝对路径，默认 ``"hpatchz"``。
-        """
-        self.executable = executable
-
-    @property
-    def available(self) -> bool:
-        """外部 ``hpatchz`` 是否可在 PATH 中找到。
-
-        Returns:
-            ``True`` 表示可执行文件存在、HDiff 补丁可用。
-        """
-        return shutil.which(self.executable) is not None
-
-    def patch(self, diff_path: str, old_path: str, new_path: str) -> None:
-        """调用外部 ``hpatchz`` 子进程把旧文件打补丁成新文件。
-
-        Args:
-            diff_path: 差分文件路径。
-            old_path: 旧（原始）文件路径。
-            new_path: 输出新文件路径（父目录会被创建）。
-
-        Raises:
-            HDiffUnavailableError: 未找到 ``hpatchz`` 时。
-            RuntimeError: 子进程返回非零退出码时。
-        """
-        if not self.available:
-            raise HDiffUnavailableError(
-                f"未找到 {self.executable}；需要 HDiffPatch 才能打增量包"
-            )
-        os.makedirs(os.path.dirname(os.path.abspath(new_path)) or ".", exist_ok=True)
-        result = subprocess.run(
-            [self.executable, "-f", old_path, diff_path, new_path],
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"{self.executable} 执行失败（{result.returncode}）："
-                f"{result.stderr.decode('utf-8', 'replace')}"
-            )
-
-
-# --------------------------------------------------------------------------- #
-# 差分应用器
-# --------------------------------------------------------------------------- #
-
-
-@dataclass
-class SophonPatcher:
-    """把 ``SophonPatchAsset`` 列表应用到本地游戏目录。"""
-
-    client: HttpClient
-    game_path: str
-    #: diff 数据的输出目录（同级）
-    patch_output_dir: Optional[str] = None
-    downloader: Optional[SophonDownloader] = None
-    hdiff: HDiffPatcher = field(default_factory=ExternalHDiffPatcher)
-    progress: Optional[ProgressBase] = None
-    logger: Any = None
-    #: 协作式中止判定，在每条补丁资产边界轮询
-    should_abort: Optional[Callable[[], bool]] = None
-
-    #: 统计
-    applied: Dict[str, int] = field(default_factory=dict)
-    #: 因缺少 HDiff 实现而未能处理的项
-    pending_hdiff: List[SophonPatchAsset] = field(default_factory=list)
-    #: 本轮未落盘成功的文件（含 pending_hdiff 与降级后仍失败的项）
-    failed: List[str] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        """补默认日志器、补 ``patch_output_dir`` 与默认下载器。"""
-        if self.logger is None:
-            self.logger = get_logger()
-        if self.patch_output_dir is None:
-            self.patch_output_dir = os.path.join(self.game_path, "chunk_auto_mas")
-        if self.downloader is None:
-            self.downloader = SophonDownloader(
-                client=self.client,
-                progress=self.progress,
-                logger=self.logger,
-                should_abort=self.should_abort,
-            )
-
-    # ---------------------------------------------------------------- 主入口
-
-    def apply(
-        self,
-        assets: List[SophonPatchAsset],
-        removed: Optional[List[str]] = None,
-        *,
-        remove_old_assets: bool = True,
-    ) -> Dict[str, int]:
-        """按补丁方式分派处理。
-
-        Args:
-            assets: 待应用的 :class:`SophonPatchAsset` 列表。
-            removed: 需要删除的旧文件路径列表；默认 ``None``。
-            remove_old_assets: 是否执行删除（``removed`` 中的项）。
-
-        Returns:
-            按补丁方式统计的计数字典（键为 ``DownloadOver`` / ``CopyOver`` /
-            ``Patch`` / ``Remove``，值为成功处理数）。环境不支持 HDiff 时，
-            相关项记入 ``self.pending_hdiff`` 而非计入统计；旧文件缺失/不符
-            或 hpatchz 失败的项降级为整文件下载，仍失败则记入 ``self.failed``，
-            单文件异常不会中止整轮更新。
-        """
-        counts: Dict[str, int] = {method.value: 0 for method in SophonPatchMethod}
-        # 一进来先复核本地：尺寸对得上的文件要读全文件算 MD5 才敢跳过，续传时
-        # 这一段可能比下载还久。不标阶段的话界面上就是「0 B / 待下量」一动不动。
-        if self.progress:
-            self.progress.set_stage("verify", "校验本地文件")
-
-        for asset in assets:
-            if self.should_abort is not None and self.should_abort():
-                raise UpdateAborted("更新已中止")
-            target = _resolve_target_path(self.game_path, asset.target_file_path)
-            if self._is_target_complete(target, asset):
-                counts[asset.patch_method.value] += 1
-                # 跳过 = 本次不用从网络取任何字节，只记条数。字节口径见下面两处
-                # advance(len(chunk_data))：总量按计划里的 Σ patch_chunk_length，
-                # 这里再按新文件大小入账会把进度灌满、把速度显示抬高。
-                if self.progress:
-                    self.progress.advance(0, count=1)
-                continue
-
-            if self.progress and self.progress.snapshot().stage != "download":
-                self.progress.set_stage("download", "下载中")
-
-            # DownloadOver 已不再由 build_patch_assets 产出（差分没点名的文件本轮
-            # 不动），留着是为了全量兜底路径能复用同一套分派
-            try:
-                if asset.patch_method == SophonPatchMethod.DownloadOver:
-                    ok = self._download_over(asset)
-                elif asset.patch_method == SophonPatchMethod.CopyOver:
-                    ok = self._copy_over(asset)
-                else:
-                    ok = self._patch_hdiff(asset)
-            except UpdateAborted:
-                raise
-            except Exception as error:  # noqa: BLE001
-                # 单文件的异常（网络/磁盘/差分数据异常）不该中止整轮更新：
-                # 记为失败并继续处理余下文件，最后统一在结果里暴露
-                ok = False
-                self.logger.warning("处理 %s 异常：%s", asset.target_file_path, error)
-
-            counts[asset.patch_method.value] += 1 if ok else 0
-            if ok and self.progress:
-                self.progress.advance(0, count=1)
-            if not ok:
-                self.failed.append(asset.target_file_path)
-                self.logger.warning(
-                    "补丁失败：%s（%s）",
-                    asset.target_file_path,
-                    asset.patch_method.value,
-                )
-
-        self.applied = counts
-
-        if remove_old_assets:
-            for name in removed or []:
-                self._remove_asset(name)
-                counts[SophonPatchMethod.Remove.value] += 1
-
-        if self.pending_hdiff:
-            self.logger.warning(
-                "有 %d 个文件需要 HDiff 补丁但当前环境不支持，已记录到 .pending_hdiff",
-                len(self.pending_hdiff),
-            )
-            self._write_pending_hdiff()
-
-        return counts
-
-    # ---------------------------------------------------------------- 各方式
-
-    def _download_over(self, asset: SophonPatchAsset) -> bool:
-        """整文件下载（与主清单流程一致）。
-
-        Args:
-            asset: 目标补丁资产（其 ``main_asset`` 提供完整 chunk 列表）。
-
-        Returns:
-            ``True`` 表示下载并校验成功；失败返回 ``False``。
-        """
-        assert self.downloader is not None and asset.main_asset is not None
-        return self.downloader.download_asset(asset.main_asset, self.game_path)
-
-    def _copy_over(self, asset: SophonPatchAsset) -> bool:
-        """—— 下载 patch chunk 并按偏移写入目标文件。
-
-        注意：要先判断该 chunk 本身是不是 HDiff，
-        若是则退化成「对空文件打补丁」。Python 侧同样处理。
-
-        Args:
-            asset: 待 CopyOver 的补丁资产（patch chunk 即新内容）。
-
-        Returns:
-            ``True`` 表示写入后文件已完整（校验通过）；否则 ``False``。
-        """
-        chunk_data = self._fetch_patch_chunk(asset)
-        target = _resolve_target_path(self.game_path, asset.target_file_path)
-
-        if chunk_data.startswith(HDIFF_MAGIC):
-            # 对空引用文件打 HDiff
-            return self._apply_hdiff_bytes(chunk_data, None, target, asset)
-
-        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
-        # 这条分片本身就是**完整的新文件**（实测 82 条 CopyOver 全部满足
-        # patch_chunk_length == target_file_size）。两个坑一起避开：
-        #   1. ``patch_offset`` 是它在差分档案里的偏移，不是目标文件里的偏移
-        #      （实测 67/82 条非零），拿它当目标偏移会写错位置；
-        #   2. 追加模式（a+b）下写入永远落在文件末尾、seek 失效，预分配再写
-        #      会把文件撑成两倍大。
-        # 所以整份写到 .temp 再原子替换，旧文件在成功前保持原样。
-        temp_path = target + ".temp"
-        try:
-            with open(temp_path, "wb") as handle:
-                handle.write(chunk_data)
-            if os.path.isfile(target):
-                os.remove(target)
-            os.replace(temp_path, target)
-        finally:
-            if os.path.isfile(temp_path):
-                _remove_quiet(temp_path)
-
-        if self.progress:
-            self.progress.advance(len(chunk_data))
-        return self._is_target_complete(target, asset)
-
-    def _patch_hdiff(self, asset: SophonPatchAsset) -> bool:
-        """——对旧文件打 HDiff 补丁生成新文件。
-
-        Args:
-            asset: 待 Patch 的补丁资产（含 old/new 路径与 diff 坐标）。
-
-        Returns:
-            ``True`` 表示补丁后文件完整（校验通过）；旧文件缺失/不符或补丁
-            失败时降级为整文件下载，仍失败返回 ``False``。
-        """
-        old_path = _resolve_target_path(self.game_path, asset.original_file_path)
-        if not self._is_old_file_usable(old_path, asset):
-            # 旧文件缺失或与差分基线不符：hpatchz 必然失败（oldDataSize/oldMd5
-            # 校验，米哈游的差分不支持从空文件重建），直接降级为整文件下载，
-            # 连补丁段都不用取
-            self.logger.warning(
-                "旧文件缺失或不符，%s 降级为整文件下载",
-                asset.target_file_path,
-            )
-            return self._download_over(asset)
-
-        chunk_data = self._fetch_patch_chunk(asset)
-        target = _resolve_target_path(self.game_path, asset.target_file_path)
-        return self._apply_hdiff_bytes(chunk_data, old_path, target, asset)
-
-    def _is_old_file_usable(self, old_path: str, asset: SophonPatchAsset) -> bool:
-        """校验旧文件是否与差分基线一致（存在、大小、MD5）。
-
-        Args:
-            old_path: 旧文件路径。
-            asset: 补丁资产（提供 ``original_file_size`` / ``original_file_hash``）。
-
-        Returns:
-            ``True`` 表示可以直接打补丁；缺失或不符返回 ``False``。
-
-        Note:
-            HDiffPatch 按差分头里的 oldDataSize/oldMd5 校验旧文件：米哈游的
-            现网差分不支持从空文件重建（实测 2026-09-25），旧文件缺失时对空
-            ``.diff_ref`` 硬打必然报 ``oldDataSize`` 不符；内容不符则产出坏
-            文件。两种情形都应由调用方降级为整文件下载。
-        """
-        if not asset.original_file_path:
-            return True
-        if not os.path.isfile(old_path):
-            return False
-        if os.path.getsize(old_path) != asset.original_file_size:
-            return False
-        if not asset.original_file_hash:
-            return True
-        digest = hashlib.md5()
-        with open(old_path, "rb") as handle:
-            for block in iter(lambda: handle.read(1 << 20), b""):
-                digest.update(block)
-        return digest.hexdigest().lower() == asset.original_file_hash.lower()
-
-    def _apply_hdiff_bytes(
-        self,
-        chunk_data: bytes,
-        old_path: Optional[str],
-        target: str,
-        asset: SophonPatchAsset,
-    ) -> bool:
-        """把一段 diff 数据落盘并交给 hdiff 补丁器应用。
-
-        Args:
-            chunk_data: 已下载的 diff 字节（写入临时 diff 文件）。
-            old_path: 旧文件路径；``None`` 时用空 ``.diff_ref`` 表示无原文件。
-            target: 输出新文件路径。
-            asset: 关联的补丁资产（用于命名与完成校验）。
-
-        Returns:
-            ``True`` 表示补丁后文件完整；若 hdiff 不可用则记入
-            ``pending_hdiff`` 并返回 ``False``；hpatchz 失败时降级为整文件
-            下载并按其结果返回。
-
-        Note:
-            先写 ``<target>.temp``，成功后删旧文件再原子替换；失败只留一个 temp
-            并被清掉。差分切片与「从零重建」的空引用文件用完立刻删除——它们原本
-            会留在缓存目录直到整轮结束，一次更新能白占好几 GiB。
-        """
-        if not self.hdiff.available:
-            self.pending_hdiff.append(asset)
-            return False
-
-        assert self.patch_output_dir is not None
-        os.makedirs(self.patch_output_dir, exist_ok=True)
-        diff_path = os.path.join(
-            self.patch_output_dir, _safe_name(asset.patch_name_source)
-        )
-        with open(diff_path, "wb") as handle:
-            handle.write(chunk_data)
-
-        temp_path = target + ".temp"
-        stub_path = ""
-        old_file = old_path
-        if old_file is None or not os.path.isfile(old_file):
-            # 没有原文件时，写一个空的 .diff_ref 代表「从零重建」。
-            # HDiffPatch 支持 oldSize=0 的差分；若现网差分并非此类，
-            # hpatchz 会失败，由下面的降级逻辑兜底
-            old_file = stub_path = os.path.join(
-                self.patch_output_dir, _safe_name(asset.target_file_path) + ".diff_ref"
-            )
-            with open(old_file, "wb"):
-                pass
-
-        try:
-            try:
-                self.hdiff.patch(diff_path, old_file, temp_path)
-            except RuntimeError as error:
-                # 差分与旧文件对不上时 hpatchz 必失败；单文件异常不该中止
-                # 整轮更新，降级为按主清单整文件下载
-                self.logger.warning(
-                    "hpatchz 失败，%s 降级为整文件下载：%s",
-                    asset.target_file_path,
-                    error,
-                )
-                return self._download_over(asset)
-            if os.path.isfile(target):
-                os.remove(target)
-            os.replace(temp_path, target)
-        finally:
-            if os.path.isfile(temp_path):
-                _remove_quiet(temp_path)
-            _remove_quiet(diff_path)
-            if stub_path:
-                _remove_quiet(stub_path)
-
-        if self.progress:
-            self.progress.advance(len(chunk_data))
-        return self._is_target_complete(target, asset)
-
-    # ---------------------------------------------------------------- 工具
-
-    def _fetch_patch_chunk(self, asset: SophonPatchAsset) -> bytes:
-        """从 diff 源里取出该 asset 对应的那段字节（按需解压并校验 MD5）。
-
-        Args:
-            asset: 待取数据的补丁资产（提供 diff 坐标与 ``patch_hash``）。
-
-        Returns:
-            该 asset 的 patch 数据原始字节。
-
-        Raises:
-            RuntimeError: 缺差分档案 chunk 信息、取回长度与清单不符，
-                或整档下载时 MD5 与清单不符。
-        """
-        # 基址只能取差分档案那份：主包 chunk 目录里没有 patch 分片，
-        # 拿主包基址去拼会 404
-        chunks_info = asset.patch_chunks_info
-        if chunks_info is None:
-            raise RuntimeError(f"缺少差分档案 chunk 信息：{asset.target_file_path}")
-
-        url = chunks_info.chunk_url(asset.patch_name_source)
-        start = asset.patch_offset
-        length = asset.patch_chunk_length
-
-        if length:
-            response = self.client.range_get(url, start, start + length - 1)
-        else:
-            response = self.client.get(url, stream=True)
-        try:
-            data = response.content
-        finally:
-            response.close()
-
-        # ``patch_hash`` / ``patch_size`` 描述的是**整份差分档案**：多个 asset 共用
-        # 同一档案、各取自己的 offset+length 段，所以按段取数时不能拿整档 MD5 来比
-        # （必然不符），只能比段长度；只有整档下载时才校验 MD5。
-        # 目标文件本身的完整性由打补丁后的 ``target_file_hash`` 兜底。
-        if length:
-            if len(data) != length:
-                raise RuntimeError(
-                    f"patch 分段长度不符：{asset.patch_name_source} "
-                    f"期望 {length} 实际 {len(data)}"
-                )
-        elif asset.patch_hash and len(data) != asset.patch_size:
-            raise RuntimeError(
-                f"差分档案大小不符：{asset.patch_name_source} "
-                f"期望 {asset.patch_size} 实际 {len(data)}"
-            )
-        elif asset.patch_hash:
-            actual = hashlib.md5(data).hexdigest()
-            if actual.lower() != asset.patch_hash.lower():
-                raise RuntimeError(
-                    f"差分档案 {asset.patch_name_source} MD5 不符"
-                    f"（期望 {asset.patch_hash}，实际 {actual}）"
-                )
-
-        if chunks_info.is_use_compression:
-            data = decompress(data)
-
-        return data
-
-    def _is_target_complete(self, target: str, asset: SophonPatchAsset) -> bool:
-        """校验目标文件大小与 MD5 是否与补丁资产一致。
-
-        Args:
-            target: 本地目标文件路径。
-            asset: 补丁资产元数据（提供期望大小与 ``target_file_hash``）。
-
-        Returns:
-            ``True`` 表示大小一致且 MD5 匹配；无 ``target_file_hash`` 时
-            仅看大小；文件不存在或不符返回 ``False``。
-        """
-        if not os.path.isfile(target):
-            return False
-        if os.path.getsize(target) != asset.target_file_size:
-            return False
-        if not asset.target_file_hash:
-            return True
-        digest = hashlib.md5()
-        with open(target, "rb") as handle:
-            for block in iter(lambda: handle.read(1 << 20), b""):
-                digest.update(block)
-        return digest.hexdigest().lower() == asset.target_file_hash.lower()
-
-    def _remove_asset(self, name: str) -> None:
-        """删除一个旧文件（HDiff 不可用等场景的清理）。
-
-        Args:
-            name: 待删除的相对文件路径。
-
-        Note:
-            先 ``chmod(0o666)`` 去掉只读位再删，规避 Windows 只读文件
-            无法直接删除的问题；失败只告警、不抛异常。
-        """
-        path = _resolve_target_path(self.game_path, name)
-        if not os.path.isfile(path):
-            return
-        try:
-            os.chmod(path, 0o666)
-            os.remove(path)
-            self.logger.debug("删除旧文件：%s", path)
-        except OSError as error:
-            self.logger.warning("删除失败 %s：%s", path, error)
-
-    def _write_pending_hdiff(self) -> None:
-        """把 ``pending_hdiff`` 清单写入游戏根目录的 ``.pending_hdiff``。
-
-        Note:
-            每行以 ``\\t`` 分隔 ``目标文件\\t原文件\\tpatch名\\t偏移\\t长度``；
-            写入失败只告警、不抛异常。
-        """
-        path = os.path.join(self.game_path, ".pending_hdiff")
-        try:
-            with open(path, "w", encoding="utf-8") as handle:
-                for asset in self.pending_hdiff:
-                    handle.write(
-                        f"{asset.target_file_path}\t{asset.original_file_path}\t"
-                        f"{asset.patch_name_source}\t{asset.patch_offset}\t"
-                        f"{asset.patch_chunk_length}\n"
-                    )
-        except OSError as error:  # pragma: no cover
-            self.logger.warning("无法写入 %s：%s", path, error)
-
-
-def _safe_name(name: str) -> str:
-    """把清单里的路径名转成本地安全文件名（防止路径穿越）。
-
-    Args:
-        name: 清单里的文件名（可能含 ``\\`` / ``/`` / ``:``）。
-
-    Returns:
-        把分隔符与冒号替换为下划线后的平面文件名，无法用于跳出目录。
-    """
-    return name.replace("\\", "_").replace("/", "_").replace(":", "_")
-
-
-def _remove_quiet(path: str) -> None:
-    """删一个中间产物文件，不存在或删不掉都不抛。
-
-    Args:
-        path: 要删除的临时文件路径。
-
-    Note:
-        临时文件删不掉不该让整次更新失败——它只是白占点磁盘，下次清理或手工删除
-        都能解决；把异常冒上去会把已经写好的游戏文件也一起判失败。
+    Raises:
+        UpdaterError: 找不到补丁工具、子进程非零退出或超时。
     """
     try:
-        os.remove(path)
-    except OSError:
-        pass
+        result = subprocess.run(
+            [exe, "-f", old, diff, out], capture_output=True, timeout=_HPATCHZ_TIMEOUT
+        )
+    except subprocess.TimeoutExpired as error:
+        raise UpdaterError(f"hpatchz 超时（{_HPATCHZ_TIMEOUT} 秒）: {out}") from error
+    except OSError as error:
+        raise UpdaterError(f"无法运行 hpatchz（{exe}）: {error}") from error
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise UpdaterError(f"hpatchz 失败（{result.returncode}）: {detail[-200:]}")
+
+
+async def _fetch_diff_segment(client: Any, asset: PatchAsset, urls: BlobUrls) -> bytes:
+    """从差分档案里按偏移取出这个文件要的那一段。
+
+    压缩标志跟随接口声明：``patch_length`` 是网线上的长度，长度校验在解压之前做。
+    """
+    url = f"{urls.diff_prefix.rstrip('/')}/{asset.patch_name}"
+    raw = await fetch_range(client, url, asset.patch_offset, asset.patch_length)
+    return decompress(raw) if urls.diff_compressed else raw
+
+
+async def _old_file_usable(game_path: str, asset: PatchAsset) -> bool:
+    """旧文件能不能直接打补丁：存在、尺寸与内容都和差分基线一致。
+
+    hpatchz 按差分头里的 oldDataSize/oldMd5 校验旧文件：米哈游的现网差分不支持从空文件
+    重建（实测 2026-09-25），旧文件缺失时对空文件硬打必然报 oldDataSize 不符；内容被改过
+    则产出一个校验不过的坏文件。两种情形都该降级整文件重下。
+    """
+    old = safe_join(game_path, asset.original_name)
+    if await asyncio.to_thread(_stat_size, old) != asset.original_size:
+        return False
+    if not asset.original_md5:
+        return True
+    actual = await asyncio.to_thread(md5_file, old)
+    return _same_md5(asset.original_md5, actual)
+
+
+def _staging_name(target: str) -> str:
+    """目标文件同级目录下的临时名（同卷，替换才是原子改名）。"""
+    directory = os.path.dirname(target) or "."
+    return os.path.join(directory, f"{os.path.basename(target)}.mas-new")
+
+
+async def _replace_from(staging: str, target: str) -> None:
+    """把已校验的临时文件原子换成目标文件。"""
+    await asyncio.to_thread(os.makedirs, os.path.dirname(target) or ".", exist_ok=True)
+    await asyncio.to_thread(os.replace, staging, target)
+
+
+async def fetch_full_asset(
+    client: Any, game_path: str, asset: PatchAsset, urls: BlobUrls
+) -> int:
+    """按主清单把这个文件整份重建出来（降级路径）。
+
+    逐个数据块从主包 ``chunk_download`` 基址取回、按接口声明的压缩标志解压、按
+    ``chunk_on_file_offset`` 写进同一个临时文件，校完整 MD5 后原子替换。
+
+    Returns:
+        从网络取回的字节数（按网线上的压缩后长度计）。
+
+    Raises:
+        UpdaterError: 主清单里没有该文件的数据块、某块长度或 MD5 不符、或整文件校验不过。
+    """
+    if not asset.chunks:
+        raise UpdaterError(f"主清单里没有 {asset.name} 的数据块，无法整文件重建")
+
+    target = safe_join(game_path, asset.name)
+    staging = _staging_name(target)
+    await asyncio.to_thread(os.makedirs, os.path.dirname(target) or ".", exist_ok=True)
+    fetched = 0
+    try:
+        with open(staging, "wb") as handle:
+            for chunk in asset.chunks:
+                url = f"{urls.main_prefix.rstrip('/')}/{chunk.chunk_name}"
+                raw = await request_bytes(client, url)
+                fetched += len(raw)
+                data = decompress(raw) if urls.main_compressed else raw
+                if not _same_md5(
+                    chunk.chunk_decompressed_hash_md5, hashlib.md5(data).hexdigest()
+                ):
+                    raise UpdaterError(
+                        f"数据块 {chunk.chunk_name} 校验失败: {asset.name}"
+                    )
+                expected = chunk.chunk_size_decompressed or chunk.chunk_size
+                if expected and len(data) != expected:
+                    raise UpdaterError(
+                        f"数据块 {chunk.chunk_name} 长度不符"
+                        f"（期望 {expected}，实际 {len(data)}）"
+                    )
+                handle.seek(chunk.chunk_on_file_offset)
+                handle.write(data)
+        if not await asyncio.to_thread(_verify, staging, asset.target_md5):
+            raise UpdaterError(f"整文件重建后校验失败: {asset.name}")
+        await _replace_from(staging, target)
+    finally:
+        with suppress(OSError):
+            if os.path.isfile(staging):
+                os.remove(staging)
+    return fetched
+
+
+def _verify(path: str, md5_wanted: str) -> bool:
+    """临时文件的 MD5 是否与清单一致。"""
+    return _same_md5(md5_wanted, md5_file(path))
+
+
+async def apply_asset(
+    client: Any,
+    game_path: str,
+    temp_dir: str,
+    asset: PatchAsset,
+    urls: BlobUrls,
+    *,
+    hpatchz: Optional[str],
+    logger: Any,
+) -> Tuple[int, bool]:
+    """处理一个文件：取回 → 校验 → 同卷原子替换。
+
+    Args:
+        client: 注入的异步客户端。
+        game_path: 游戏安装目录。
+        temp_dir: 中间产物目录（放差分切片）。
+        asset: 待处理明细。
+        urls: 差分与主包两处基址。
+        hpatchz: ``hpatchz`` 路径；``None`` 表示手上没有补丁工具。
+        logger: 用于记下每一次降级。
+
+    Returns:
+        ``(从网络取回的字节数, 是否走了整文件降级)``；目标已是新内容时返回 ``(0, False)``。
+
+    Raises:
+        UpdaterError: 取回、打补丁或校验失败，且降级也没成——由调用方计成本轮失败文件。
+    """
+    target = safe_join(game_path, asset.name)
+    if await _target_is_current(target, asset):
+        return 0, False
+
+    if not asset.is_patch:
+        # 分片本身就是完整的新文件（实测 82 条 CopyOver 全部满足
+        # patch_length == target_file_size）；patch_offset 是分片在差分档案里的偏移，
+        # 不是目标文件里的偏移（实测 67/82 条非零），拿它当目标偏移会写错位置。
+        data = await _fetch_diff_segment(client, asset, urls)
+        if not _same_md5(asset.target_md5, hashlib.md5(data).hexdigest()):
+            raise UpdaterError(f"CopyOver 内容校验失败: {asset.name}")
+        staging = _staging_name(target)
+        try:
+            await asyncio.to_thread(_write_bytes, staging, data)
+            await _replace_from(staging, target)
+        finally:
+            with suppress(OSError):
+                if os.path.isfile(staging):
+                    os.remove(staging)
+        return asset.patch_length, False
+
+    if hpatchz is None or not await _old_file_usable(game_path, asset):
+        logger.warning(
+            "%s 的差分基线不可用（旧文件缺失、尺寸或内容不符，或没有补丁工具），"
+            "降级为整文件下载",
+            asset.name,
+        )
+        return await fetch_full_asset(client, game_path, asset, urls), True
+
+    data = await _fetch_diff_segment(client, asset, urls)
+    old = safe_join(game_path, asset.original_name)
+    staging = _staging_name(target)
+    diff_path = os.path.join(temp_dir, f"{_safe_leaf(asset.patch_name)}.diff")
+    try:
+        await asyncio.to_thread(_write_bytes, diff_path, data)
+        try:
+            await asyncio.to_thread(_run_hpatchz, hpatchz, old, diff_path, staging)
+        except UpdaterError as error:
+            # 打不出可信的新文件：退回整文件重下，取回的差分片段照实计入流量
+            logger.warning("%s 打补丁失败，降级为整文件下载: %s", asset.name, error)
+            with suppress(OSError):
+                if os.path.isfile(staging):
+                    os.remove(staging)
+            fetched = await fetch_full_asset(client, game_path, asset, urls)
+            return fetched + len(data), True
+        if not await asyncio.to_thread(_verify, staging, asset.target_md5):
+            raise UpdaterError(f"补丁结果校验失败: {asset.name}")
+        await _replace_from(staging, target)
+    finally:
+        # 清残骸不能顶掉真正的失败原因（或取消），所以整段包住
+        with suppress(OSError):
+            if os.path.isfile(staging):
+                os.remove(staging)
+        with suppress(OSError):
+            os.remove(diff_path)
+    return asset.patch_length, False
+
+
+def _write_bytes(path: str, data: bytes) -> None:
+    """覆盖写一个文件。"""
+    with open(path, "wb") as handle:
+        handle.write(data)
+
+
+def _safe_leaf(name: str) -> str:
+    """把分片名压成一个安全的文件名。"""
+    return name.replace("/", "_").replace("\\", "_").replace(":", "_")[-120:]
+
+
+async def remove_unused(game_path: str, removals: Sequence[str], logger: Any) -> int:
+    """删掉本轮淘汰的旧文件，返回真正删掉的个数。"""
+    removed = 0
+    for name in removals:
+        path = safe_join(game_path, name)
+        if not await asyncio.to_thread(os.path.isfile, path):
+            continue
+        try:
+            await asyncio.to_thread(os.remove, path)
+            removed += 1
+        except OSError as error:
+            logger.warning("删除旧文件失败 %s: %s", name, error)
+    return removed

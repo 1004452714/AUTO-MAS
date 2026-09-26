@@ -73,7 +73,6 @@ async def handle_genshin_game_update(
     result = await update_genshin_client(
         str(Path(game_exe).parent),
         resource="官服" if region == "cn" else "国际服",
-        time_limit_min=int(script_config.get("Game", "UpdateTimeLimit")),
         on_progress=report,
     )
 

@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.services.gi_updater import api
 from app.services.gi_updater.common import summarize_size
 from app.services.gi_updater.games import create_updater
 
@@ -29,7 +30,11 @@ async def probe(game: str, region: str, game_dir: str) -> dict:
         可 JSON 序列化的探测结果。
     """
     updater = create_updater(game, region, game_dir)
-    plan = await asyncio.to_thread(updater.check)
+    client = api.new_client()
+    try:
+        plan = await updater.check(client)
+    finally:
+        await client.aclose()
     return {
         "game": game,
         "region": region,
@@ -38,12 +43,18 @@ async def probe(game: str, region: str, game_dir: str) -> dict:
         "kind": plan.kind.value,
         "source": str(plan.source_version or ""),
         "target": str(plan.target_version or ""),
-        "target_raw_tag": updater.installer._raw_target_tag(False),
-        "matching_fields": list(plan.matching_fields),
+        "target_raw_tag": updater.version_manager.remote_tag,
+        "preload_raw_tag": updater.version_manager.preload_tag,
         "file_count": plan.file_count,
+        "patch_count": plan.summary.patch_count,
+        "copyover_count": plan.summary.copyover_count,
+        "downgraded": plan.summary.downgraded,
+        "ready": plan.summary.ready,
+        "disk_need": plan.disk_need,
         "total_size": plan.total_size,
         "total_size_text": summarize_size(plan.total_size),
-        "assets_enum": len(plan.assets),
+        "removals": len(plan.removals),
+        "message": plan.message,
     }
 
 

@@ -53,25 +53,25 @@
 
 - :mod:`~app.services.gi_updater.common`     与游戏无关的基础件（中止与路径异常、日志、ini、进度）
 - :mod:`~app.services.gi_updater.presets`    每款游戏每个区服的预设（三元组、端点与 Sophon 目录）
-- :mod:`~app.services.gi_updater.api`        启动器元数据接口、响应模型与阻塞式 HTTP 客户端
-- :mod:`~app.services.gi_updater.sophon`     Sophon 清单解析、zstd/protobuf 解码与分块下载
+- :mod:`~app.services.gi_updater.api`        HYP Connect 与 Sophon 端点：注入异步客户端、逐处窄取值
+- :mod:`~app.services.gi_updater.sophon`     Sophon 清单与差分清单的 protobuf schema 与 zstd 解压
 - :mod:`~app.services.gi_updater.patch`      Sophon 差分清单解析与补丁落盘
 - :mod:`~app.services.gi_updater.versioning` 版本号、本地/远程版本与安装状态机
 - :mod:`~app.services.gi_updater.install`    计划编排与落盘收尾
 - :mod:`~app.services.gi_updater.games`      各游戏差异化钩子与 :func:`create_updater` 装配
-- :mod:`~app.services.gi_updater.pipeline`   宿主侧编排：挪出事件循环、进度转日志、三道门禁
+- :mod:`~app.services.gi_updater.pipeline`   宿主侧编排：区服判定、三道门禁、面向用户的叙述
 
-除 ``pipeline`` 之外本包**全同步**（urllib + 线程 + 阻塞文件 IO），不 import
-``app.core`` / ``app.api``，可以脱离宿主单独导入与自测。``pipeline`` 是宿主侧的异步
-编排层，负责把同步引擎挪出事件循环、把进度转成调度台日志、并补上只有宿主才该管的
+本包全异步：HTTP 客户端由调用方建好传进来（``httpx.AsyncClient``），阻塞的文件与哈希
+操作走 ``asyncio.to_thread``。除了 :mod:`~app.services.gi_updater.pipeline` 取宿主的
+日志与补丁工具，其余模块不 import ``app.core`` / ``app.api``，可以脱离宿主单独导入与
+自测。``pipeline`` 负责握住客户端的寿命、把结论转成调度台日志、并补上只有宿主才该管的
 三道门禁；一款游戏的门面只做「钉自己的短名」这一件事。
 
-只实现 Sophon 差分一条执行链路：原神自 5.6 起官方不再下发 zip 分包，两个区服预设
-都置 ``is_force_redirect_to_sophon``，传统 zip 链路（下载分包 → 解压 → hdiff →
-deletefiles）对本包永远不可达，故未收录；全新安装（``SophonInstall``）、全量比较
-（``SophonUpdate``）与预下载（``SophonPreload``）只产出计划供宿主提示，无人值守
-一律停手交给官方启动器。要接不支持强制 Sophon 的游戏时，需要补回一条 zip 执行链路、
-多会话分片下载器，以及 ``UpdateKind`` 的 zip 取值与 ``build_plan`` 的链路判定。
+只实现 Sophon 差分一条执行链路：米哈游自原神 5.6 起不再下发 zip 分包，传统 zip 链路
+（下载分包 → 解压 → hdiff → deletefiles）已无对应实现；全新安装（``SophonInstall``）、
+全量比较（``SophonUpdate``）与预下载（``SophonPreload``）只产出计划供宿主提示，无人
+值守一律停手交给官方启动器。要接仍以 zip 分包为主的游戏时，需要另补一条 zip 执行链路
+与相应的 ``UpdateKind`` 取值。
 
 新增一款米哈游游戏（如绝区零）只需四步，不改引擎正文：在
 :mod:`~app.services.gi_updater.presets` 的 ``GameKey`` 登记短名并补
