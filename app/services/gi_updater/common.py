@@ -51,6 +51,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 __all__ = [
+    "IniFormatError",
     "UpdateAborted",
     "get_logger",
     "UnsafePathError",
@@ -65,6 +66,10 @@ __all__ = [
     "SilentProgressListener",
     "summarize_size",
 ]
+
+
+class IniFormatError(RuntimeError):
+    """现有 ``config.ini`` 读不懂，拒绝改写。"""
 
 
 class UpdateAborted(RuntimeError):
@@ -475,18 +480,160 @@ class IniFile:
         return self.newline.join(lines).rstrip(self.newline) + self.newline
 
     def save(self, path: str) -> None:
-        """将文档写回磁盘；必要时自动创建父目录。
+        """把改动写回磁盘——**只替换变化的那几行**，其余字节原样保留。
 
-        写回沿用加载时探测到的编码（``encoding``）与换行符（``newline``）。
+        目标文件已存在时走单行替换：定位 ``[段]`` 下的 ``键=值`` 行，整行换成模型里的
+        新值并沿用该行原有的行尾；模型里有、文件里没有的键追加到该段末尾；文件里有而
+        模型没动的段、键、注释行、空行一概不碰。文件不存在才整份写出。
 
         Args:
             path: 目标文件路径。
+
+        Raises:
+            IniFormatError: 现有文件按加载时的编码解不开时——宁可停手，也不把一份读不
+                懂的配置覆盖掉。
+
+        Note:
+            不整份重序列化，是因为模型只认段与键：注释、未知段、键的原始大小写与对齐
+            都会在重写中丢掉，而这两个 ``config.ini`` 里还放着游戏与启动器自己的配置。
+            同名重复键只替换第一次出现，后续出现原样留着。落盘一律原子改名，免得写一半
+            时断电留下截断文件。
         """
         directory = os.path.dirname(os.path.abspath(path))
         if directory and not os.path.isdir(directory):
             os.makedirs(directory, exist_ok=True)
-        with open(path, "w", encoding=self.encoding, newline="") as handle:
-            handle.write(self.dumps())
+
+        from pathlib import Path as _Path
+
+        from app.utils.io import atomic_write as _atomic_write
+
+        existing = self._read_existing(path)
+        payload = self.dumps() if existing is None else self._splice(existing)
+        _atomic_write(_Path(path), payload.encode(self.encoding))
+
+    def _read_existing(self, path: str) -> Optional[str]:
+        """按加载时的编码读出磁盘上的现有内容。
+
+        Args:
+            path: 目标文件路径。
+
+        Returns:
+            解码后的文本；文件不存在时返回 ``None``，表示需要整份写出。
+
+        Raises:
+            IniFormatError: 解码失败时。
+        """
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "rb") as handle:
+                return handle.read().decode(self.encoding)
+        except (UnicodeDecodeError, ValueError) as error:
+            raise IniFormatError(
+                f"{path} 解不开为 {self.encoding} 文本，拒绝改写以免损坏配置"
+            ) from error
+
+    def _section_spans(self, lines: List[str]) -> Dict[str, Tuple[int, int]]:
+        """算出每个段在原文里的行区间。
+
+        Args:
+            lines: 带行尾的原文行。
+
+        Returns:
+            ``段名（折叠大小写）-> (起始行, 结束行左开)``，段头行本身含在区间内。
+        """
+        spans: Dict[str, List[int]] = {}
+        current: Optional[str] = None
+        for index, line in enumerate(lines):
+            match = _SECTION_RE.match(line)
+            if match:
+                current = match.group("name").casefold()
+                spans.setdefault(current, [index, index + 1])
+            elif current is not None:
+                spans[current][1] = index + 1
+        return {name: (span[0], span[1]) for name, span in spans.items()}
+
+    def _splice(self, text: str) -> str:
+        """把模型里被改过的键替换进原文，其余行一字不动。
+
+        Args:
+            text: 磁盘上的现有文本。
+
+        Returns:
+            改好的完整文本。
+        """
+        lines = text.splitlines(keepends=True)
+        spans = self._section_spans(lines)
+        ending = self.newline
+        rewritten: set = set()
+        appends: Dict[str, List[str]] = {}
+
+        for name, section in self.items():
+            span = spans.get(name.casefold())
+            if span is None:
+                appends[name] = [
+                    f"{key}={section[key]}{ending}" for key in section.order
+                ]
+                continue
+            for key in section.order:
+                value = section[key]
+                tail = None
+                for index in range(span[0], span[1]):
+                    if index in rewritten:
+                        continue
+                    line = lines[index]
+                    match = _KV_RE.match(line)
+                    if not match or match.group("key").casefold() != key.casefold():
+                        continue
+                    tail = line[len(line.rstrip("\r\n")) :] or ending
+                    lines[index] = f"{key}={value}{tail}"
+                    rewritten.add(index)
+                    break
+                if tail is None:
+                    appends.setdefault(name, []).append(f"{key}={value}{ending}")
+
+        if not appends:
+            return "".join(lines)
+        return self._insert_appends(lines, spans, appends, ending)
+
+    @staticmethod
+    def _insert_appends(
+        lines: List[str],
+        spans: Dict[str, Tuple[int, int]],
+        appends: Dict[str, List[str]],
+        ending: str,
+    ) -> str:
+        """把原文里没有的键插到所属段末尾；段本身也不存在时整段追加到文件末尾。
+
+        Args:
+            lines: 已完成单行替换的原文行。
+            spans: 段名（折叠大小写）到行区间，由 :meth:`_section_spans` 给出。
+            appends: ``段名 -> 待插入的行``。
+            ending: 该文档的主要行尾。
+
+        Returns:
+            插入完成的文本。
+        """
+        insert_at: List[Tuple[int, str]] = []
+        at_eof: List[str] = []
+        for name, extra in appends.items():
+            block = "".join(extra)
+            span = spans.get(name.casefold())
+            if span is None:
+                at_eof.append(f"[{name}]{ending}{block}")
+            else:
+                insert_at.append((span[1], block))
+
+        out = list(lines)
+        # 从后往前插，前面的插入才不会把后面的行号顶掉
+        for index, block in sorted(insert_at, reverse=True):
+            out.insert(index, block)
+        text = "".join(out)
+        if at_eof:
+            if text and not text.endswith(ending):
+                text += ending
+            text += "".join(at_eof)
+        return text
 
 
 def summarize_size(size: float) -> str:
