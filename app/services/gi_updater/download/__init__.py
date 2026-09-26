@@ -42,7 +42,6 @@ from app.services.gi_updater.download.sophon import (
     SophonManifestInfo,
 )
 from app.services.gi_updater.download.sophon_patch import (
-    BLANK_FILE_MD5,
     ExternalHDiffPatcher,
     HDiffPatcher,
     HDiffUnavailableError,
@@ -52,11 +51,8 @@ from app.services.gi_updater.download.sophon_patch import (
     build_patch_assets,
 )
 from app.services.gi_updater.download.zstd import (
-    ZstdBackend,
     ZstdError,
-    backend_name,
     decompress,
-    is_available,
     iter_decompress,
 )
 
@@ -73,10 +69,7 @@ __all__ = [
     "parse_sophon_patch",
     "read_message",
     "ZstdError",
-    "ZstdBackend",
-    "backend_name",
     "decompress",
-    "is_available",
     "iter_decompress",
     "SophonAsset",
     "SophonChunk",
@@ -86,7 +79,6 @@ __all__ = [
     "SophonError",
     "SophonManifest",
     "SophonManifestInfo",
-    "BLANK_FILE_MD5",
     "ExternalHDiffPatcher",
     "HDiffPatcher",
     "HDiffUnavailableError",

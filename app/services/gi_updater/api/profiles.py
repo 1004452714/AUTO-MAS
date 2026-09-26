@@ -35,7 +35,6 @@ from typing import Dict, List, Optional, Tuple
 __all__ = [
     "SophonChunkUrls",
     "PresetConfig",
-    "GameNameType",
     "Region",
     "PROFILES",
     "get_profile",
@@ -44,12 +43,6 @@ __all__ = [
 # --------------------------------------------------------------------------- #
 # 枚举（/ LauncherType）
 # --------------------------------------------------------------------------- #
-
-
-class GameNameType:
-    """游戏类型标识，写进 ``config.ini`` 的 ``[Profile]`` 段。"""
-
-    Genshin = "Genshin"
 
 
 class Region:
@@ -123,10 +116,6 @@ class PresetConfig:
 
     # 身份
     profile_name: str
-    game_name: str
-    game_type: str
-    zone_name: str
-    vendor_type: str
 
     # HYP Connect 三元组
     launcher_id: str
@@ -140,13 +129,6 @@ class PresetConfig:
 
     # 本地安装形态
     executable_name: str = ""
-    internal_game_name_in_config: str = ""
-    game_directory_name: str = "Games"
-    game_data_folder_name: str = ""
-
-    # 语言
-    default_voice_language: str = "zh-cn"
-    supported_languages: Tuple[str, ...] = ("zh-cn", "en-us", "ja-jp", "ko-kr")
 
     # API 端点
     api_base: str = ""
@@ -260,8 +242,6 @@ _GLB_DL = "https://sg-downloader-api.hoyoverse.com"
 _CN_LAUNCHER_ID = "jGHBHlcOq1"
 _GLB_LAUNCHER_ID = "VYTpXlbWo8"
 
-_COMMON_LOCALES = ("zh-cn", "en-us", "ja-jp", "ko-kr")
-
 
 def _sophon_urls(base: str) -> SophonChunkUrls:
     """构造本区服的 Sophon 下载 URL 组。
@@ -301,10 +281,6 @@ def _build_profiles() -> Dict[Tuple[str, str], PresetConfig]:
     # ---------------------------------------------------------------- 原神
     profiles[("gi", Region.CN)] = PresetConfig(
         profile_name="GICN",
-        game_name="原神",
-        game_type=GameNameType.Genshin,
-        zone_name="Mainland China",
-        vendor_type="miHoYo",
         launcher_id=_CN_LAUNCHER_ID,
         game_id="1Z8W5NHUQb",
         launcher_biz_name="hk4e_cn",
@@ -312,11 +288,6 @@ def _build_profiles() -> Dict[Tuple[str, str], PresetConfig]:
         sub_channel_id=1,
         cps="mihoyo",
         executable_name="YuanShen.exe",
-        internal_game_name_in_config="原神",
-        game_directory_name="Genshin Impact Game",
-        game_data_folder_name="YuanShen_Data",
-        default_voice_language="zh-cn",
-        supported_languages=_COMMON_LOCALES,
         api_base=_CN_API,
         downloader_base=_CN_DL,
         # 5.6 起官方移除 zip 包，本预设强制走 Sophon
@@ -326,10 +297,6 @@ def _build_profiles() -> Dict[Tuple[str, str], PresetConfig]:
 
     profiles[("gi", Region.GLOBAL)] = PresetConfig(
         profile_name="GIGlb",
-        game_name="Genshin Impact",
-        game_type=GameNameType.Genshin,
-        zone_name="Global",
-        vendor_type="miHoYo",
         launcher_id=_GLB_LAUNCHER_ID,
         game_id="gopR6Cufr3",
         launcher_biz_name="hk4e_global",
@@ -337,11 +304,6 @@ def _build_profiles() -> Dict[Tuple[str, str], PresetConfig]:
         sub_channel_id=0,
         cps="mihoyo",
         executable_name="GenshinImpact.exe",
-        internal_game_name_in_config="Genshin Impact",
-        game_directory_name="Genshin Impact Game",
-        game_data_folder_name="GenshinImpact_Data",
-        default_voice_language="en-us",
-        supported_languages=_COMMON_LOCALES,
         api_base=_GLB_API,
         downloader_base=_GLB_DL,
         is_force_redirect_to_sophon=True,

@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import os
 import shutil
-from typing import List
 
 from app.services.gi_updater.install.base import InstallManagerBase, UpdatePlan
 from app.services.gi_updater.versioning import GameTypeGenshinVersion
@@ -105,11 +104,10 @@ class GenshinInstaller(InstallManagerBase):
 
         Note:
             与基类不同，原神把每个 locale code 经 :meth:`language_string_from_locale_code`
-            转成 ``Chinese`` / ``English(US)`` 等全名再写盘；``dry_run`` 或拿不到路径时
-            直接跳过（不写盘）。
+            转成 ``Chinese`` / ``English(US)`` 等全名再写盘；拿不到路径时直接跳过（不写盘）。
         """
         path = self.version.audio_lang_list_path_static()
-        if not path or self.dry_run:
+        if not path:
             return
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
@@ -125,11 +123,8 @@ class GenshinInstaller(InstallManagerBase):
             plan: 当前执行计划（本覆写未使用，仅保持接口一致）。
 
         Note:
-            仅在非 ``dry_run`` 时调用 :meth:`migrate_audio_directory`；迁移的具体动作
-            与搬移计数由该方法负责。
+            迁移的具体动作与搬移计数由 :meth:`migrate_audio_directory` 负责。
         """
-        if self.dry_run:
-            return
         self.migrate_audio_directory()
 
     def migrate_audio_directory(self) -> int:
@@ -169,11 +164,3 @@ class GenshinInstaller(InstallManagerBase):
             委托 ``version.is_exec_data_dir_valid()`` 判定（混装时为 False）。
         """
         return self.version.is_exec_data_dir_valid()
-
-    def candidate_executable_names(self) -> List[str]:
-        """返回可能的游戏可执行文件名列表（用于校验安装完整性）。
-
-        Returns:
-            委托 ``version._candidate_executable_names()``（原神是国服/国际服互斥双名）。
-        """
-        return self.version._candidate_executable_names()
