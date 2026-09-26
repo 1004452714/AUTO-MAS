@@ -46,7 +46,7 @@ class GameSpec:
         key: 注册短名，与 ``presets.PROFILES`` 键的第一项一致（如 ``gi``）。
         display_name: 面向用户的名字，用于日志与报错文案。
         version_cls: 该游戏的版本管理器，负责本地版本与安装态判定。
-        installer_cls: 该游戏的安装管理器，覆写语音清单等专属钩子。
+        installer_cls: 该游戏的安装管理器，覆写安装态判定等专属钩子。
         locale_regions: 区服配置项的中文标签 -> 区服短名，顺序即「自动」的探测顺序，
             第一项同时是空目录（新装）时的默认区服。
         executable_regions: 游戏程序文件名（小写）-> 区服短名，供宿主按可执行文件

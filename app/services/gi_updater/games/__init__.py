@@ -25,7 +25,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Optional
 
 from app.services.gi_updater.api import HttpClient, LauncherApi
 from app.services.gi_updater.common import ProgressBase, get_logger
@@ -99,7 +99,6 @@ def create_updater(
     progress: Optional[ProgressBase] = None,
     logger: Any = None,
     chunk_thread_count: int = 8,
-    voice_languages: Optional[List[str]] = None,
     should_abort: Optional[Callable[[], bool]] = None,
     hdiff_executable: Optional[str] = None,
 ) -> GameUpdater:
@@ -114,7 +113,6 @@ def create_updater(
         progress: 进度对象；可为 ``None``。
         logger: 日志对象；缺省时取模块默认 logger。
         chunk_thread_count: 单文件分块下载线程数（默认 8）。
-        voice_languages: 要保留的语音 locale code 列表，决定下载哪些语音包。
         should_abort: 协作式中止判定，下载在资产与数据块边界轮询它；
             ``None`` 表示不可中止。
         hdiff_executable: ``hpatchz`` 可执行文件路径；缺省时按 ``PATH`` 查找。
@@ -142,9 +140,6 @@ def create_updater(
     )
     installer.should_abort = should_abort
     installer.hdiff_executable = hdiff_executable
-    if voice_languages:
-        installer.sophon_voice_languages = list(voice_languages)
-
     return GameUpdater(
         preset=preset,
         version_manager=version_manager,

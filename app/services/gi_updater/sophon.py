@@ -30,9 +30,7 @@
 
 关键不变式：
 
-    * ``matching_field`` 决定清单类别：``game`` 是主资源，
-      ``zh-cn / en-us / ja-jp / ko-kr`` 是各语言语音包
-    * 语音包就是「换一个 matching_field 再走一遍完全相同的流程」
+    * ``matching_field`` 决定清单类别，主资源用 ``game``
     * chunk 是按**偏移直写**，不是先落临时文件再合并
 
 清单与差分档案的正文都是 protobuf。这里用 protobuf 官方运行时按 schema 构造消息类，
@@ -89,10 +87,7 @@ from typing import Any, Callable, Iterator, List, Optional, Sequence
 import zstandard
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 
-from app.services.gi_updater.api import (
-    HttpClient,
-    SophonManifestBuildBranch,
-)
+from app.services.gi_updater.api import HttpClient
 from app.services.gi_updater.common import (
     ProgressBase,
     UpdateAborted,
@@ -125,7 +120,6 @@ __all__ = [
     "SophonManifest",
     "SophonDownloader",
     "SophonError",
-    "VOICE_MATCHING_FIELDS",
 ]
 
 
@@ -599,8 +593,6 @@ def iter_decompress(stream: Any, chunk_size: int = 65536) -> Iterator[bytes]:
         raise ZstdError(f"zstd 解压失败: {exc}") from exc
 
 
-#: 语音包使用的 matching_field
-VOICE_MATCHING_FIELDS = ("zh-cn", "en-us", "ja-jp", "ko-kr")
 #: 主资源
 MAIN_MATCHING_FIELD = "game"
 
@@ -666,43 +658,12 @@ class SophonChunkManifestInfoPair:
 
     manifest_info: Optional[SophonManifestInfo] = None
     chunks_info: Optional[SophonChunksInfo] = None
-    #: 同一个 getBuild 响应里的其它 manifest（用于取语音包）
-    other_build_data: Optional[SophonManifestBuildBranch] = None
     matching_field: str = ""
     category_id: int = 0
     category_name: str = ""
     is_found: bool = False
     return_code: int = 0
     return_message: str = ""
-
-    def get_other_manifest_info_pair(
-        self, matching_field: str
-    ) -> "SophonChunkManifestInfoPair":
-        """取同一份 build 下另一个 ``matching_field`` 的清单信息对。
-
-        同一个 build 响应里换 ``matching_field`` 再定位一次——这正是语音包的实现方式。
-
-        Args:
-            matching_field: 目标 matching_field（如 ``zh-cn``）。
-
-        Returns:
-            定位到的信息对；找不到则 ``is_found=False``，并可能带 404 信息。
-        """
-        if self.other_build_data is None:
-            return SophonChunkManifestInfoPair(
-                matching_field=matching_field, is_found=False
-            )
-
-        identity = self.other_build_data.find(matching_field)
-        if identity is None:
-            return SophonChunkManifestInfoPair(
-                matching_field=matching_field,
-                is_found=False,
-                return_code=404,
-                return_message=f"Sophon manifest with matching field: {matching_field} is not found!",
-            )
-
-        return _identity_to_pair(identity, self.other_build_data)
 
 
 @dataclass
@@ -750,14 +711,11 @@ class SophonAsset:
 # --------------------------------------------------------------------------- #
 
 
-def _identity_to_pair(
-    identity: Any, build_data: SophonManifestBuildBranch
-) -> SophonChunkManifestInfoPair:
+def _identity_to_pair(identity: Any) -> SophonChunkManifestInfoPair:
     """把 ``SophonManifestBuildIdentity`` 转成信息对。
 
     Args:
         identity: 从 getBuild 响应解析出的某 matching_field 身份对象。
-        build_data: 原始 build 响应数据（用于在语音包场景里二次定位）。
 
     Returns:
         填充好的 :class:`SophonChunkManifestInfoPair`（``is_found=True``）。
@@ -787,7 +745,6 @@ def _identity_to_pair(
     return SophonChunkManifestInfoPair(
         manifest_info=manifest_info,
         chunks_info=chunks_info,
-        other_build_data=build_data,
         matching_field=identity.matching_field,
         category_id=identity.category_id,
         category_name=identity.category_name,
@@ -854,7 +811,7 @@ class SophonManifest:
                 return_message=f"Sophon manifest with matching field: {field_name} is not found!",
             )
 
-        return _identity_to_pair(identity, build)
+        return _identity_to_pair(identity)
 
     @staticmethod
     def create_patch_info_pair(

@@ -727,30 +727,3 @@ class GameVersionBase:
         return GameInstallStateEnum.Installed
 
     # ================================================================== 本地探测
-
-    def audio_lang_list_path(self) -> Optional[str]:
-        """返回「已安装语音清单」文件的**实际路径**（仅当文件存在时）。
-
-        Returns:
-            实例方法，会探测文件是否真实存在；不存在返回 ``None``。
-                基类默认返回 ``None``，由子类覆写指向各自清单文件（如原神的
-                ``audio_lang_14``、崩铁的 ``AudioLaucherRecord.txt``）。
-
-        Note:
-            与 `audio_lang_list_path_static` 的区别：本方法是「探测 + 返回」，
-            后者是「纯拼路径、不检查存在性」。写盘时用 static 拿目标路径，
-            读盘 / 校验时用本方法确认文件真的在。
-        """
-        return None
-
-    def audio_lang_list_path_static(self) -> str:
-        """返回语音清单文件的**规范路径**（不检查文件是否存在）。
-
-        Returns:
-            总是返回拼好的全路径；基类默认返回空串，子类覆写。
-
-        Note:
-            纯路径计算、无副作用；与 `audio_lang_list_path`（探测实际存在）
-            形成「目标路径 vs 实际路径」的对照，安装写入阶段多用本方法。
-        """
-        return ""
