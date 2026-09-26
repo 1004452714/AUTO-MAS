@@ -14,5 +14,9 @@ export type BetterGIConfig_Game = {
      * 任务结束后是否关闭游戏
      */
     CloseOnFinish?: (boolean | null);
+    /**
+     * 启动游戏前由 MAS 检查并应用原神客户端增量更新（拿不到差分则停手提示）
+     */
+    IfAutoUpdate?: (boolean | null);
 };
 
