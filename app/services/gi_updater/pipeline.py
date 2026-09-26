@@ -65,6 +65,9 @@ logger = get_logger("更新引擎")
 #: 一行面向用户的进度文案
 ProgressHook = Callable[[str], Awaitable[None]]
 
+#: 中止判定；为真时更新在文件与数据块边界收工
+AbortHook = Callable[[], bool]
+
 #: 区服配置项里表示「按目录里的客户端自己判」的取值
 AUTO_REGION_LABEL = "自动"
 #: 判定「可执行文件是真的在那儿」的最小体积，与引擎口径一致
@@ -345,6 +348,7 @@ async def update_client(
     resource: str = AUTO_REGION_LABEL,
     time_limit_min: int = 0,
     on_progress: ProgressHook | None = None,
+    should_abort: AbortHook | None = None,
 ) -> UpdateResult:
     """检查并按需更新指定游戏的客户端，直到落盘完成。
 
@@ -355,6 +359,7 @@ async def update_client(
         time_limit_min: 本轮时限（分钟）；``0`` 表示不限。超时按中止处理，
             等下载线程真收干净了才返回。
         on_progress: 一行行进度文案的回调。
+        should_abort: 外部中止判定（如用户按了停止）；与时限共用同一条收工路径。
 
     Returns:
         :class:`UpdateResult`。任何异常都转成 ``success=False`` 的结论，
@@ -382,6 +387,7 @@ async def update_client(
             resource=resource,
             on_progress=on_progress,
             abort_event=abort_event,
+            external_abort=should_abort,
         )
     )
     if time_limit_min > 0:
@@ -413,6 +419,7 @@ async def _run_update(
     resource: str,
     on_progress: ProgressHook | None,
     abort_event: threading.Event,
+    external_abort: AbortHook | None = None,
 ) -> UpdateResult:
     """跑完一轮「算计划 -> 过门禁 -> 下载落盘」，同步引擎全程挪出事件循环。
 
@@ -422,6 +429,7 @@ async def _run_update(
         resource: 区服口径。
         on_progress: 进度回调。
         abort_event: 时限到点置位的中止标志；下载与打补丁在边界轮询它。
+        external_abort: 外部中止判定，与 ``abort_event`` 取或。
 
     Returns:
         本轮结论。
@@ -435,8 +443,10 @@ async def _run_update(
         return UpdateResult(success=False, noop=True, message=message)
 
     def should_abort() -> bool:
-        """引擎侧的中止判定：只看时限标志。"""
-        return abort_event.is_set()
+        """引擎侧的中止判定：时限到点或外部要求停止都算。"""
+        if abort_event.is_set():
+            return True
+        return bool(external_abort and external_abort())
 
     resolved = _resolve_region(game, game_dir, resource)
     if resolved is None:
