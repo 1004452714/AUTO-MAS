@@ -45,7 +45,7 @@ from typing import List, Optional
 
 from app.services.gi_updater.games.spec import GameSpec, register
 from app.services.gi_updater.install import InstallManagerBase, UpdatePlan
-from app.services.gi_updater.presets import GameKey
+from app.services.gi_updater.presets import GameKey, Region
 from app.services.gi_updater.versioning import GameVersionBase
 
 __all__ = [
@@ -296,5 +296,11 @@ GENSHIN = register(
         display_name="原神",
         version_cls=GameTypeGenshinVersion,
         installer_cls=GenshinInstaller,
+        locale_regions=(("官服", Region.CN), ("国际服", Region.GLOBAL)),
+        # B 服与官服同名 YuanShen.exe，不做区分
+        executable_regions={
+            "yuanshen.exe": Region.CN,
+            "genshinimpact.exe": Region.GLOBAL,
+        },
     )
 )
