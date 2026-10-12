@@ -427,10 +427,24 @@ async def _ensure_game_updated(
             if isinstance(error, OSError)
             else str(error)
         )
-        logger.warning(f"终末地差量更新失败: {error}")
+        if not detail:
+            # httpx 把 anyio 的连接中断与超时包成 str() 为空串的异常，只取 str(error)
+            # 会留下一行看不出所以然的「自动更新失败（）」
+            detail = (
+                "网络超时" if isinstance(error, httpx.TimeoutException) else "网络中断"
+            )
+        logger.opt(exception=True).warning(
+            f"终末地差量更新失败（{type(error).__name__}: {error}）"
+        )
+        # 网络这一段全在写盘之前，暂存里的分卷与清单都留给下一轮接着用
+        hint = (
+            "请检查网络后再点一次「检查更新」，已下好的部分会接着用"
+            if isinstance(error, httpx.HTTPError)
+            else "请手动更新游戏后重试"
+        )
         return GameUpdateResult(
             "NeedManualUpdate",
-            f"{outdated}，MAS 自动更新失败（{detail}），请手动更新游戏后重试",
+            f"{outdated}，MAS 自动更新失败（{detail}），{hint}",
         )
     except Exception as error:
         # 兜底：本函数对外承诺不抛，调用方才能拿 status 决定放行还是阻断。走到这里
