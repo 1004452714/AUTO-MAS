@@ -279,6 +279,8 @@ async def _ensure_game_updated(
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(_READ_TIMEOUT, connect=_CONNECT_TIMEOUT),
                 follow_redirects=True,
+                # 这条链路的三处 client 都不继承机器代理，为什么只走直连见 ../../AGENTS.md
+                trust_env=False,
             ) as client:
                 specs = await _fetch_patch_manifest(
                     client, release.patch_info_url, release.patch_info_md5
@@ -428,11 +430,12 @@ async def _ensure_game_updated(
             else str(error)
         )
         if not detail:
-            # httpx 把 anyio 的连接中断与超时包成 str() 为空串的异常，只取 str(error)
-            # 会留下一行看不出所以然的「自动更新失败（）」
-            detail = (
-                "网络超时" if isinstance(error, httpx.TimeoutException) else "网络中断"
-            )
+            # httpx 传输层异常的消息是从下层原样接过来的，自己那层常是空串；能说出所以然的
+            # 是异常链里最近一个有原文的那层（socket 与 TLS 的报错在那下面）
+            cause = error.__cause__
+            while cause is not None and not str(cause):
+                cause = cause.__cause__
+            detail = str(cause) if cause else type(error).__name__
         logger.opt(exception=True).warning(
             f"终末地差量更新失败（{type(error).__name__}: {error}）"
         )

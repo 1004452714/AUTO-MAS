@@ -238,6 +238,7 @@ async def _fetch_release(
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(_READ_TIMEOUT, connect=_CONNECT_TIMEOUT),
         headers={"Content-Type": "application/json"},
+        trust_env=False,
     ) as client:
         response = await client.post(preset["api_url"], json=body)
     response.raise_for_status()

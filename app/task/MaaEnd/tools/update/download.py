@@ -181,6 +181,7 @@ async def _download_release(
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(_READ_TIMEOUT, connect=_CONNECT_TIMEOUT),
         follow_redirects=True,
+        trust_env=False,
     ) as client:
         for index, planned in enumerate(release.parts, start=1):
             target = staging / names[index - 1]
